@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Trash2, AlertTriangle, Check } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import { TopBar } from './components/TopBar';
 import { Editor, EditorRef } from './components/Editor';
 import { Terminal } from './components/Terminal';
@@ -17,6 +18,12 @@ import { THEME_PALETTES, DEFAULT_CUSTOM_COLORS } from './constants/themes';
 import { PythonWebSocketRunner, PyodideRunner, RunCallbacks } from './utils/pythonRunner';
 import { getApiUrl, isAndroidApkEnvironment } from './utils/apiConfig';
 import { sendAiDebugRequest } from './utils/geminiClient';
+import {
+  initAuth,
+  googleSignIn,
+  logout as googleLogout,
+  clearCachedAccessToken,
+} from './utils/googleAuth';
 import {
   SyntaxColors,
   KeyItem,
@@ -154,18 +161,25 @@ export default function App() {
   const [isStudyOpen, setIsStudyOpen] = useState(false);
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsFocusSection, setSettingsFocusSection] = useState<'ai-key' | null>(null);
+  const [settingsFocusSection, setSettingsFocusSection] = useState<'google-account' | 'gemini-ai' | 'server-gateway' | null>(null);
   const [isFileManagerOpen, setIsFileManagerOpen] = useState(false);
   const [isConfirmClearOpen, setIsConfirmClearOpen] = useState(false);
   const [isExportApkOpen, setIsExportApkOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const showToast = (msg: string) => {
+  // Google Account & Workspace OAuth State (token strictly in-memory)
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+  const [needsGoogleAuth, setNeedsGoogleAuth] = useState<boolean>(false);
+  const [isGoogleSigningIn, setIsGoogleSigningIn] = useState<boolean>(false);
+  const [googleAuthError, setGoogleAuthError] = useState<string | null>(null);
+
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((curr) => (curr === msg ? null : curr));
     }, 2500);
-  };
+  }, []);
 
   // AI Debugger state
   const [isAiDebugOpen, setIsAiDebugOpen] = useState(false);
@@ -185,6 +199,70 @@ export default function App() {
   const editorRef = useRef<EditorRef>(null);
   const cpythonRunnerRef = useRef<PythonWebSocketRunner | null>(null);
   const pyodideRunnerRef = useRef<PyodideRunner | null>(null);
+
+  // Clean up any legacy manual API key entries from earlier versions
+  useEffect(() => {
+    try {
+      localStorage.removeItem('pydroid_gemini_api_key');
+    } catch (_) {}
+  }, []);
+
+  // Initialize Google OAuth state listener
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleAccessToken(token);
+        setNeedsGoogleAuth(!token);
+        setGoogleAuthError(null);
+      },
+      (user) => {
+        setGoogleUser(user);
+        setGoogleAccessToken(null);
+        setNeedsGoogleAuth(Boolean(user));
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleSignIn = useCallback(async () => {
+    setIsGoogleSigningIn(true);
+    setGoogleAuthError(null);
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setGoogleUser(res.user);
+        setGoogleAccessToken(res.accessToken);
+        setNeedsGoogleAuth(false);
+        showToast(`Đã kết nối Google: ${res.user.displayName || res.user.email || 'Tài khoản Google'}`);
+      }
+    } catch (err: any) {
+      const message = err?.message || 'Không thể đăng nhập bằng Google lúc này.';
+      setGoogleAuthError(message);
+      showToast(message);
+    } finally {
+      setIsGoogleSigningIn(false);
+    }
+  }, [showToast]);
+
+  const handleGoogleSignOut = useCallback(async () => {
+    try {
+      await googleLogout();
+      setGoogleUser(null);
+      setGoogleAccessToken(null);
+      setNeedsGoogleAuth(false);
+      setGoogleAuthError(null);
+      showToast('Đã đăng xuất tài khoản Google.');
+    } catch (err: any) {
+      showToast(err?.message || 'Không thể đăng xuất lúc này.');
+    }
+  }, [showToast]);
+
+  const handleDriveTokenExpired = useCallback(() => {
+    clearCachedAccessToken();
+    setGoogleAccessToken(null);
+    setNeedsGoogleAuth(true);
+  }, []);
 
   // Pre-initialize runners on mount and cleanup on unmount
   useEffect(() => {
@@ -515,7 +593,7 @@ export default function App() {
         errorType: 'AI Error',
         vietnameseSummary: 'Không thể phân tích lỗi lúc này.',
         rootCause: err.message || 'Lỗi kết nối máy chủ Gemini AI.',
-        tips: ['Kiểm tra kết nối mạng hoặc cấu hình Khóa Gemini API trong Cài đặt.'],
+        tips: ['Kiểm tra kết nối mạng hoặc trạng thái máy chủ Gemini AI trong mục Cài đặt.'],
         fixedCode: code,
         diffExplanation: 'Không có thay đổi.',
       });
@@ -666,6 +744,12 @@ export default function App() {
         onOpenExportApk={() => setIsExportApkOpen(true)}
         engine={engine}
         onToggleEngine={handleToggleEngine}
+        googleUser={googleUser}
+        googleAccessToken={googleAccessToken}
+        onOpenGoogleAccount={() => {
+          setSettingsFocusSection('google-account');
+          setIsSettingsOpen(true);
+        }}
       />
 
       {/* Main Workspace (Editor or Terminal) */}
@@ -818,6 +902,18 @@ export default function App() {
         onOpenExportApk={() => setIsExportApkOpen(true)}
         customColors={customColors}
         focusSection={settingsFocusSection}
+        googleUser={googleUser}
+        googleAccessToken={googleAccessToken}
+        needsGoogleAuth={needsGoogleAuth}
+        isGoogleSigningIn={isGoogleSigningIn}
+        googleAuthError={googleAuthError}
+        onGoogleSignIn={handleGoogleSignIn}
+        onGoogleSignOut={handleGoogleSignOut}
+        onOpenFileManager={() => {
+          setIsSettingsOpen(false);
+          setSettingsFocusSection(null);
+          setIsFileManagerOpen(true);
+        }}
       />
 
       {/* 5. File Manager Modal */}
@@ -833,6 +929,14 @@ export default function App() {
         savedFiles={savedFiles}
         onDeleteFile={handleDeleteFile}
         onUploadFile={handleUploadFile}
+        googleUser={googleUser}
+        googleAccessToken={googleAccessToken}
+        needsGoogleAuth={needsGoogleAuth}
+        isGoogleSigningIn={isGoogleSigningIn}
+        googleAuthError={googleAuthError}
+        onGoogleSignIn={handleGoogleSignIn}
+        onDriveTokenExpired={handleDriveTokenExpired}
+        onShowToast={showToast}
       />
 
       {/* 6. Python AI Coding Assistant Chat Modal */}
@@ -853,7 +957,7 @@ export default function App() {
           showToast('Đã áp dụng mã từ Trợ lý AI vào Editor!');
         }}
         onOpenSettings={() => {
-          setSettingsFocusSection('ai-key');
+          setSettingsFocusSection('gemini-ai');
           setIsSettingsOpen(true);
         }}
       />

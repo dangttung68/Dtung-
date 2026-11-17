@@ -4,11 +4,13 @@
  * All Gemini AI calls are strictly managed server-side.
  */
 
-// Official Production/Cloud Run API Server Endpoints
+// Official Production/Cloud Run & Render API Server Endpoints
 export const DEFAULT_CLOUD_API_URL = 'https://ais-pre-g5w3wggai6dcyye22rmjnk-772838390153.asia-southeast1.run.app';
 export const DEV_CLOUD_API_URL = 'https://ais-dev-g5w3wggai6dcyye22rmjnk-772838390153.asia-southeast1.run.app';
+export const RENDER_CLOUD_API_URL = 'https://py70632.onrender.com';
 
 const STORAGE_GATEWAY_KEY = 'pydroid_api_gateway_url';
+const OFFLINE_MARKER = 'offline';
 
 /**
  * Checks if the current environment is running inside an Android APK (native Capacitor wrapper)
@@ -27,6 +29,7 @@ export function isAndroidApkEnvironment(): boolean {
     hostname.includes('aistudio.google.com') ||
     hostname.includes('google.com') ||
     hostname.includes('run.app') ||
+    hostname.includes('onrender.com') ||
     port === '3000' ||
     port === '5173'
   ) {
@@ -64,7 +67,7 @@ export function isAndroidApkEnvironment(): boolean {
 /**
  * Returns the active API Gateway Base URL.
  * - When in Web browser: returns empty string "" (relative paths /api/* work automatically)
- * - When in native Android APK or overridden by user: returns configured cloud URL
+ * - When in native Android APK: defaults to RENDER_CLOUD_API_URL (https://py70632.onrender.com) unless explicitly set offline or overridden
  */
 export function getApiBaseUrl(): string {
   if (typeof window === 'undefined') return '';
@@ -72,24 +75,59 @@ export function getApiBaseUrl(): string {
   const isApk = isAndroidApkEnvironment();
   const saved = localStorage.getItem(STORAGE_GATEWAY_KEY);
 
+  if (!isApk) {
+    if (saved && saved.trim()) {
+      const clean = saved.trim().replace(/\/+$/, '');
+      if (clean === OFFLINE_MARKER) {
+        try {
+          localStorage.removeItem(STORAGE_GATEWAY_KEY);
+        } catch (_) {}
+        return '';
+      }
+      // Clear stale/legacy preview or old Render domains if previously stored
+      if (
+        clean === 'https://tu70632.onrender.com' ||
+        clean.includes('ais-pre-') ||
+        clean.includes('ais-dev-')
+      ) {
+        try {
+          localStorage.removeItem(STORAGE_GATEWAY_KEY);
+        } catch (_) {}
+        return '';
+      }
+      if (clean.startsWith('http://') || clean.startsWith('https://')) {
+        // Avoid redirecting to the exact same origin
+        if (window.location.origin && clean === window.location.origin.replace(/\/+$/, '')) {
+          return '';
+        }
+        return clean;
+      }
+    }
+    return '';
+  }
+
   if (saved && saved.trim()) {
     const clean = saved.trim().replace(/\/+$/, '');
-    // If not in APK and saved URL was the default cloud URL that could have failed CORS/302, clear it
-    if (!isApk && (clean.includes('ais-pre-') || clean.includes('ais-dev-'))) {
-      try {
-        localStorage.removeItem(STORAGE_GATEWAY_KEY);
-      } catch (_) {}
+    if (clean === OFFLINE_MARKER) {
       return '';
+    }
+    // Auto-migrate legacy Render gateway URL to the new synced Render server
+    if (clean === 'https://tu70632.onrender.com') {
+      try {
+        localStorage.setItem(STORAGE_GATEWAY_KEY, RENDER_CLOUD_API_URL);
+      } catch (_) {}
+      return RENDER_CLOUD_API_URL;
     }
     if (clean.startsWith('http://') || clean.startsWith('https://')) {
       return clean;
     }
   }
 
-  // Note: In native Android APK, do not default to ais-pre/ais-dev Cloud Run URLs
-  // because AI Studio preview URLs require cookie authentication not available in APK WebViews.
-  // Direct Google Gemini REST API will be used for AI features on APK.
-  return '';
+  // Default Cloud Backend for Android APK
+  try {
+    localStorage.setItem(STORAGE_GATEWAY_KEY, RENDER_CLOUD_API_URL);
+  } catch (_) {}
+  return RENDER_CLOUD_API_URL;
 }
 
 /**
@@ -105,7 +143,7 @@ export function getDisplayApiBaseUrl(): string {
 }
 
 /**
- * Persists a custom API Gateway URL (or reset to default)
+ * Persists a custom API Gateway URL (or reset to offline/default)
  */
 export function setApiBaseUrl(url: string): void {
   if (typeof window === 'undefined') return;
@@ -113,54 +151,21 @@ export function setApiBaseUrl(url: string): void {
 
   if (clean && (clean.startsWith('http://') || clean.startsWith('https://'))) {
     localStorage.setItem(STORAGE_GATEWAY_KEY, clean);
+  } else if (isAndroidApkEnvironment()) {
+    localStorage.setItem(STORAGE_GATEWAY_KEY, OFFLINE_MARKER);
   } else {
     localStorage.removeItem(STORAGE_GATEWAY_KEY);
   }
 }
 
-const STORAGE_GEMINI_KEY = 'pydroid_gemini_api_key';
-
-export function sanitizeGeminiApiKey(raw: string): string {
-  return (raw || '').replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-}
-
-export function getGeminiApiKey(): string {
-  if (typeof window === 'undefined') return '';
-  return sanitizeGeminiApiKey(localStorage.getItem(STORAGE_GEMINI_KEY) || '');
-}
-
-export function setGeminiApiKey(key: string): void {
-  if (typeof window === 'undefined') return;
-  const clean = sanitizeGeminiApiKey(key);
-  if (clean) {
-    localStorage.setItem(STORAGE_GEMINI_KEY, clean);
-  } else {
-    localStorage.removeItem(STORAGE_GEMINI_KEY);
-  }
-}
-
-export function isLikelyGeminiApiKey(str: string): boolean {
-  if (!str) return false;
-  const s = sanitizeGeminiApiKey(str);
-  if (s.includes('...') || s.includes('MY_GEMINI') || s.includes('YOUR_API')) {
-    return false;
-  }
-  return /^[A-Za-z0-9_.-]{20,}$/.test(s);
-}
-
 /**
- * Returns common HTTP headers for API calls, automatically forwarding user Gemini API key if valid
+ * Returns common HTTP headers for API calls
  */
 export function getApiHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
-  const userKey = getGeminiApiKey();
-  const headers: Record<string, string> = {
+  return {
     'Content-Type': 'application/json',
     ...extraHeaders,
   };
-  if (userKey && isLikelyGeminiApiKey(userKey)) {
-    headers['x-gemini-api-key'] = sanitizeGeminiApiKey(userKey);
-  }
-  return headers;
 }
 
 /**
@@ -215,7 +220,7 @@ export async function testApiGatewayConnection(customUrl?: string): Promise<{
     return {
       ok: false,
       latencyMs: 0,
-      message: 'Bản APK độc lập chưa nhập URL Cổng Cloud. Để dùng Gemini AI trên điện thoại, hãy dán Google Gemini API Key ở mục (2) bên dưới!',
+      message: 'Bản APK độc lập chưa nhập URL Cổng Cloud Backend. Bạn vẫn có thể đăng nhập Google Drive để đồng bộ mã nguồn .py hoặc chạy Python ngoại tuyến bằng Pyodide WASM.',
     };
   }
 
@@ -256,10 +261,13 @@ export async function testApiGatewayConnection(customUrl?: string): Promise<{
     }
 
     const data = await resp.json();
+    const hasGemini = Boolean(data?.features?.geminiAi);
     return {
       ok: true,
       latencyMs,
-      message: 'Kết nối Cổng Cloud Backend thành công! CPython, Pip và Gemini AI sẵn sàng.',
+      message: hasGemini
+        ? 'Kết nối Máy chủ Backend thành công! CPython, Pip và Gemini AI sẵn sàng.'
+        : 'Đã kết nối Máy chủ Backend (CPython & Pip sẵn sàng), nhưng máy chủ này chưa có biến GEMINI_API_KEY.',
       details: data,
     };
   } catch (err: any) {
@@ -274,31 +282,39 @@ export async function testApiGatewayConnection(customUrl?: string): Promise<{
   }
 }
 
-
-
 /**
- * Checks server Gemini AI health status (or direct APK key readiness)
+ * Checks server-side Gemini AI health status
  */
-export async function testServerAiStatus(): Promise<{
+export async function testServerAiStatus(customUrl?: string): Promise<{
   ok: boolean;
   model: string;
   message: string;
+  diagnostic?: {
+    httpStatus?: number | null;
+    keyPresent?: boolean;
+    keySource?: string;
+    geminiKeyLen?: number;
+    geminiKeyStartsAIza?: boolean;
+    rawError?: string;
+  };
 }> {
   const isApk = isAndroidApkEnvironment();
-  const baseUrl = getApiBaseUrl();
-  const rawKey = getGeminiApiKey();
-  const hasValidUserKey = isLikelyGeminiApiKey(rawKey);
+  const rawCustom = customUrl !== undefined ? customUrl.trim().replace(/\/+$/, '') : '';
+  const baseUrl = rawCustom && (rawCustom.startsWith('http://') || rawCustom.startsWith('https://'))
+    ? rawCustom
+    : getApiBaseUrl();
+
+  const statusEndpoint = baseUrl ? `${baseUrl}/api/ai/status` : '/api/ai/status';
 
   // Query server-side status endpoint when on Web OR when APK has a Cloud Gateway URL configured
   if (!isApk || baseUrl) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
-      const cleanKey = hasValidUserKey ? sanitizeGeminiApiKey(rawKey) : undefined;
-      const resp = await fetch(getApiUrl('/api/ai/status'), {
+      const resp = await fetch(statusEndpoint, {
         method: 'POST',
         headers: getApiHeaders(),
-        body: JSON.stringify(cleanKey ? { geminiApiKey: cleanKey } : {}),
+        body: JSON.stringify({}),
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -306,47 +322,19 @@ export async function testServerAiStatus(): Promise<{
       if (resp.ok && contentType.includes('application/json')) {
         return await resp.json();
       }
-    } catch (_) {}
-  }
-
-  if (isApk && hasValidUserKey) {
-    // Test live connectivity directly to Google Gemini on APK
-    try {
-      const cleanKey = sanitizeGeminiApiKey(rawKey);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`,
-        { signal: controller.signal }
-      );
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        const models: Array<{ name: string }> = Array.isArray(data.models) ? data.models : [];
-        const has4H = models.some((m) => m.name && m.name.includes('gemini-4-hydrogen'));
-        const has38 = models.some((m) => m.name && m.name.includes('gemini-3.8-flash'));
-        const activeModel = has4H
-          ? 'gemini-4-hydrogen'
-          : has38
-          ? 'gemini-3.8-flash'
-          : (models.find((m) => m.name && m.name.includes('gemini'))?.name?.replace('models/', '') || 'gemini-4-hydrogen');
+      return {
+        ok: false,
+        model: 'local-pep8-engine',
+        message: `Máy chủ ${baseUrl || 'hiện tại'} phản hồi HTTP ${resp.status} khi kiểm tra Gemini AI. Kiểm tra lại phiên bản backend và biến GEMINI_API_KEY trên máy chủ.`,
+      };
+    } catch (err: any) {
+      if (baseUrl) {
         return {
-          ok: true,
-          model: activeModel,
-          message: `Bản APK Android đã kết nối trực tiếp thành công với Google Gemini (${activeModel})!`,
+          ok: false,
+          model: 'local-pep8-engine',
+          message: `Không thể gọi /api/ai/status tới ${baseUrl} (${err?.name === 'AbortError' ? 'quá thời gian chờ 12s' : 'lỗi mạng hoặc CORS'}). Bộ phân tích PEP 8 nội bộ vẫn hoạt động bình thường.`,
         };
       }
-      return {
-        ok: false,
-        model: 'local-pep8-engine',
-        message: `Khóa Gemini API trên APK bị từ chối (HTTP ${res.status}). Vui lòng kiểm tra lại khóa trong phần Cài đặt.`,
-      };
-    } catch (_) {
-      return {
-        ok: false,
-        model: 'local-pep8-engine',
-        message: 'Không thể kết nối mạng tới Google Gemini từ thiết bị Android. Đang dùng Trợ lý Nội bộ chuẩn PEP 8.',
-      };
     }
   }
 
@@ -354,13 +342,13 @@ export async function testServerAiStatus(): Promise<{
     return {
       ok: false,
       model: 'local-pep8-engine',
-      message: 'Bản APK chưa có khóa Google Gemini API (đang chạy PEP 8 nội bộ). Bấm "Nhập khóa AI" để kết nối Gemini AI!',
+      message: 'Bản APK ngoại tuyến đang chạy bộ phân tích PEP 8 nội bộ. Cấu hình URL Cổng Cloud trong Cài đặt để kết nối Gemini AI máy chủ.',
     };
   }
 
   return {
     ok: false,
     model: 'local-pep8-engine',
-    message: 'Không thể kiểm tra trạng thái Gemini AI từ máy chủ. Vui lòng kiểm tra kết nối hoặc nhập khóa cá nhân.',
+    message: 'Không thể kiểm tra trạng thái Gemini AI từ máy chủ. Kiểm tra cấu hình máy chủ hoặc kết nối mạng.',
   };
 }

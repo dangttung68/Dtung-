@@ -23,11 +23,14 @@ import {
   Wifi,
   RotateCcw,
   Check,
-  Key,
-  Eye,
-  EyeOff,
-  ShieldCheck,
+  Cloud,
+  LogOut,
+  FolderOpen,
+  Layers as ServicesIcon,
+  ExternalLink,
+  Copy,
 } from 'lucide-react';
+import type { User as FirebaseUser } from 'firebase/auth';
 import { ExecutionEngine, SyntaxColors } from '../types';
 import { DEFAULT_CUSTOM_COLORS } from '../constants/themes';
 import {
@@ -41,13 +44,11 @@ import {
   setApiBaseUrl,
   testApiGatewayConnection,
   testServerAiStatus,
-  getGeminiApiKey,
-  setGeminiApiKey,
-  DEFAULT_CLOUD_API_URL,
   isAndroidApkEnvironment,
-  isLikelyGeminiApiKey,
+  DEFAULT_CLOUD_API_URL,
+  RENDER_CLOUD_API_URL,
 } from '../utils/apiConfig';
-import { verifyGeminiApiKey } from '../utils/geminiClient';
+import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface InstalledPackage {
   name: string;
@@ -74,7 +75,15 @@ interface SettingsModalProps {
   onOpenColorPicker?: () => void;
   onOpenExportApk?: () => void;
   customColors?: SyntaxColors;
-  focusSection?: 'ai-key' | null;
+  focusSection?: 'google-account' | 'gemini-ai' | 'server-gateway' | null;
+  googleUser?: FirebaseUser | null;
+  googleAccessToken?: string | null;
+  needsGoogleAuth?: boolean;
+  isGoogleSigningIn?: boolean;
+  googleAuthError?: string | null;
+  onGoogleSignIn?: () => void;
+  onGoogleSignOut?: () => void;
+  onOpenFileManager?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -92,6 +101,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenExportApk,
   customColors,
   focusSection,
+  googleUser,
+  googleAccessToken,
+  needsGoogleAuth,
+  isGoogleSigningIn,
+  googleAuthError,
+  onGoogleSignIn,
+  onGoogleSignOut,
+  onOpenFileManager,
 }) => {
   const [versionInfo, setVersionInfo] = useState<{
     cpythonVersion: string;
@@ -145,16 +162,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Server Gemini AI Status States
   const [isTestingAiServer, setIsTestingAiServer] = useState<boolean>(false);
-  const [aiServerStatus, setAiServerStatus] = useState<{ ok: boolean; model: string; message: string } | null>(null);
-
-  // Gemini API Key Input States (For Web and Android APK)
-  const [geminiApiKeyInput, setGeminiApiKeyInput] = useState<string>(() => getGeminiApiKey());
-  const [showKeyPassword, setShowKeyPassword] = useState<boolean>(false);
-  const [isVerifyingKey, setIsVerifyingKey] = useState<boolean>(false);
-  const [keyVerifyResult, setKeyVerifyResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [keySaveSuccess, setKeySaveSuccess] = useState<boolean>(false);
+  const [aiServerStatus, setAiServerStatus] = useState<{
+    ok: boolean;
+    model: string;
+    message: string;
+    diagnostic?: {
+      httpStatus?: number | null;
+      keyPresent?: boolean;
+      keySource?: string;
+      geminiKeyLen?: number;
+      geminiKeyStartsAIza?: boolean;
+      rawError?: string;
+    };
+  } | null>(null);
+  const [pendingUninstallPkg, setPendingUninstallPkg] = useState<string | null>(null);
+  const googleSectionRef = useRef<HTMLDivElement>(null);
   const geminiSectionRef = useRef<HTMLDivElement>(null);
-  const geminiKeyInputRef = useRef<HTMLInputElement>(null);
+  const serverSectionRef = useRef<HTMLDivElement>(null);
 
   // Fetch installed packages
   const fetchInstalledPackages = async () => {
@@ -268,13 +292,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setActiveActionPkg(null);
   };
 
-  // Trigger Uninstall
-  const handleUninstallPackage = async (pkgName: string) => {
-    if (!pkgName.trim()) return;
+  // Trigger Uninstall (executed after in-app confirmation)
+  const executeUninstallPackage = async (pkgName: string) => {
     const clean = pkgName.trim();
-    if (!confirm(`Bạn có chắc chắn muốn gỡ cài đặt thư viện [${clean}] không?`)) {
-      return;
-    }
+    if (!clean) return;
+    setPendingUninstallPkg(null);
 
     setActiveActionPkg(clean);
     setActionType('uninstall');
@@ -313,9 +335,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (isOpen) {
       setApiGatewayUrl(getApiBaseUrl());
       setApiTestResult(null);
-      setGeminiApiKeyInput(getGeminiApiKey());
-      setKeyVerifyResult(null);
-      setKeySaveSuccess(false);
+      setAiServerStatus(null);
+      setPendingUninstallPkg(null);
       testBrowserWebAssemblySupport().then(setWasmStatus).catch(() => {});
       fetchInstalledPackages();
       handleSearchPackages('');
@@ -334,10 +355,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         })
         .catch(() => {});
 
-      if (focusSection === 'ai-key') {
+      if (focusSection === 'google-account') {
+        setTimeout(() => {
+          googleSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 120);
+      } else if (focusSection === 'gemini-ai') {
         setTimeout(() => {
           geminiSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          geminiKeyInputRef.current?.focus();
+        }, 120);
+      } else if (focusSection === 'server-gateway') {
+        setTimeout(() => {
+          serverSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }, 120);
       }
     }
@@ -594,14 +622,259 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* 7. Cổng API & Máy chủ Trợ lý AI (Backend Gateway cho APK Android & Web) */}
-          <div className="p-2.5 rounded-xl bg-[#141420] border border-[#262538] space-y-2">
-            <div className="flex items-center justify-between">
+          {/* 1. Tài khoản Google & Google Drive (Tách biệt hoàn toàn khỏi Gemini AI) */}
+          <div ref={googleSectionRef} className="p-2.5 rounded-xl bg-[#141420] border border-[#262538] space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-gray-200 flex items-center space-x-1.5 text-xs">
+                <Cloud className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span>1. Tài khoản Google</span>
+              </span>
+              <span
+                className={`text-[9px] font-bold px-2 py-0.5 rounded border shrink-0 ${
+                  googleUser
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                    : 'bg-gray-800/80 border-gray-700 text-gray-300'
+                }`}
+              >
+                {googleUser ? 'Đã đăng nhập' : 'Chưa đăng nhập'}
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-[#0e0e18] border border-[#2b2a40] space-y-2.5">
+              {googleUser ? (
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center space-x-2.5 min-w-0">
+                    {googleUser.photoURL ? (
+                      <img
+                        src={googleUser.photoURL}
+                        alt={googleUser.displayName || 'Google User'}
+                        className="w-9 h-9 rounded-full border border-emerald-400/50 object-cover shrink-0"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-9 h-9 rounded-full bg-sky-500/20 border border-sky-400/40 flex items-center justify-center text-sky-300 font-bold text-sm shrink-0">
+                        {(googleUser.displayName?.[0] || googleUser.email?.[0] || 'G').toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="font-bold text-xs text-gray-100 truncate">
+                        {googleUser.displayName || 'Người dùng Google'}
+                      </div>
+                      <div className="text-[10px] text-gray-400 truncate font-mono">
+                        {googleUser.email || 'Đã xác thực'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-1.5 shrink-0">
+                    {googleAccessToken && onOpenFileManager && (
+                      <button
+                        type="button"
+                        onClick={onOpenFileManager}
+                        className="px-2.5 py-1 bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 rounded-lg text-[11px] font-bold flex items-center space-x-1 cursor-pointer transition active:scale-95"
+                      >
+                        <FolderOpen className="w-3 h-3" />
+                        <span>Mở Google Drive</span>
+                      </button>
+                    )}
+                    {onGoogleSignOut && (
+                      <button
+                        type="button"
+                        onClick={onGoogleSignOut}
+                        className="px-2.5 py-1 bg-rose-950/60 hover:bg-rose-900/70 text-rose-300 border border-rose-500/40 rounded-lg text-[11px] font-bold flex items-center space-x-1 cursor-pointer transition active:scale-95"
+                      >
+                        <LogOut className="w-3 h-3" />
+                        <span>Đăng xuất</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[11px] text-gray-300 leading-relaxed">
+                  Đăng nhập bằng <strong className="text-white">Tài khoản Google</strong> để lưu, mở và đồng bộ tệp mã nguồn <code className="text-sky-300">.py</code> trên Google Drive (hoạt động độc lập với Trợ lý AI).
+                </p>
+              )}
+
+              {(!googleAccessToken || needsGoogleAuth || !googleUser) && onGoogleSignIn && (
+                <div className="pt-0.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <GoogleSignInButton
+                    onClick={onGoogleSignIn}
+                    isLoading={isGoogleSigningIn}
+                    label={googleUser ? 'Cấp lại quyền Google Drive' : 'Đăng nhập bằng Google'}
+                    compact
+                  />
+                  {googleUser && !googleAccessToken && (
+                    <span className="text-[10px] text-amber-300">
+                      Đã đăng nhập tài khoản — bấm để kết nối lại quyền đọc/ghi Drive.
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {googleAuthError && (
+                <div className="p-2 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-300 text-[10px] flex items-start space-x-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{googleAuthError}</span>
+                </div>
+              )}
+
+              {isAndroidApkEnvironment() && (!googleUser || !googleAccessToken) && (
+                <div className="p-2.5 rounded-lg bg-sky-950/30 border border-sky-500/30 text-[10px] text-sky-200 space-y-2">
+                  <p className="leading-relaxed text-gray-300">
+                    <strong className="text-sky-300">Mẹo cho người dùng APK:</strong> Android WebView chặn cửa sổ đăng nhập Google (<code className="text-amber-300">disallowed_useragent</code>). Bạn có thể mở bản Web bằng <strong>Chrome</strong> để đăng nhập Google và đồng bộ Drive bình thường:
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <a
+                      href={
+                        apiGatewayUrl.trim().startsWith('http')
+                          ? apiGatewayUrl.trim().replace(/\/+$/, '')
+                          : RENDER_CLOUD_API_URL
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1.5 bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/50 rounded-lg font-bold flex items-center space-x-1 transition"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span>Mở bản Render Web trên Chrome</span>
+                    </a>
+                    <a
+                      href={DEFAULT_CLOUD_API_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1.5 bg-[#1b1a2e] hover:bg-[#262540] text-gray-200 border border-[#3a385c] rounded-lg font-semibold flex items-center space-x-1 transition"
+                    >
+                      <ExternalLink className="w-3 h-3 text-cyan-300" />
+                      <span>Mở bản AI Studio trên Chrome</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1 border-t border-[#222136]">
+                <div className="p-2 rounded-lg bg-[#141422] border border-[#25243b] flex items-center justify-between">
+                  <div className="flex items-center space-x-1.5">
+                    <Cloud className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-200">Google Drive (.py)</div>
+                      <div className="text-[9px] text-gray-400">Lưu &amp; mở mã nguồn đám mây</div>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                      googleAccessToken
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : 'bg-gray-800 text-gray-400'
+                    }`}
+                  >
+                    {googleAccessToken ? 'Sẵn sàng' : 'Chờ cấp quyền'}
+                  </span>
+                </div>
+
+                <div className="p-2 rounded-lg bg-[#141422] border border-[#25243b] flex items-center justify-between">
+                  <div className="flex items-center space-x-1.5">
+                    <ServicesIcon className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-200">Hồ sơ Google</div>
+                      <div className="text-[9px] text-gray-400">Đăng nhập tiêu chuẩn</div>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                      googleUser
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : 'bg-gray-800 text-gray-400'
+                    }`}
+                  >
+                    {googleUser ? 'Đã liên kết' : 'Chưa liên kết'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 2. Trợ lý Gemini AI (Hoạt động độc lập với Tài khoản Google) */}
+          <div ref={geminiSectionRef} className="p-2.5 rounded-xl bg-[#141420] border border-[#262538] space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-gray-200 flex items-center space-x-1.5 text-xs">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>2. Trợ lý Gemini AI</span>
+              </span>
+              <span className="text-[9px] font-bold px-2 py-0.5 rounded border bg-amber-500/10 border-amber-500/35 text-amber-300 shrink-0">
+                Độc lập với Google Auth
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-[#0e0e18] border border-[#2b2a40] flex items-center justify-between gap-2">
+              <div className="flex items-center space-x-2 min-w-0">
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[11px] text-gray-200 font-medium">
+                    Google Gemini Flash &amp; Live API
+                  </div>
+                  <div className="text-[9px] text-emerald-400 font-mono truncate">
+                    Gọi qua máy chủ (/api/ai/*) • Dự phòng PEP 8 ngoại tuyến
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isTestingAiServer}
+                onClick={async () => {
+                  setIsTestingAiServer(true);
+                  setAiServerStatus(null);
+                  const res = await testServerAiStatus(apiGatewayUrl.trim() || undefined);
+                  setAiServerStatus(res);
+                  setIsTestingAiServer(false);
+                }}
+                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 active:scale-95 disabled:opacity-50 font-bold rounded-lg text-xs flex items-center space-x-1 transition cursor-pointer shrink-0"
+              >
+                <RefreshCw className={`w-3 h-3 ${isTestingAiServer ? 'animate-spin' : ''}`} />
+                <span>{isTestingAiServer ? 'Đang kiểm tra...' : 'Kiểm tra trạng thái'}</span>
+              </button>
+            </div>
+
+            {aiServerStatus && (
+              <div
+                className={`p-2 rounded-lg text-[10px] flex items-start space-x-2 border transition ${
+                  aiServerStatus.ok
+                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                {aiServerStatus.ok ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1 leading-tight space-y-1">
+                  <div className="font-semibold">{aiServerStatus.message}</div>
+                  {aiServerStatus.diagnostic && !aiServerStatus.ok && (
+                    <div className="text-[9.5px] font-mono text-amber-200/90 bg-black/30 px-2 py-1 rounded border border-rose-500/30">
+                      {aiServerStatus.diagnostic.keyPresent
+                        ? `Máy chủ đã nhận ${aiServerStatus.diagnostic.keySource} (${aiServerStatus.diagnostic.geminiKeyLen || 0} ký tự), nhưng Google trả về HTTP ${aiServerStatus.diagnostic.httpStatus ?? 'lỗi'}: khóa hiện tại bị từ chối (API_KEY_INVALID).`
+                        : 'Máy chủ đang chọn chưa có biến môi trường GEMINI_API_KEY.'}
+                    </div>
+                  )}
+                  <p className={`text-[10px] ${aiServerStatus.ok ? 'text-emerald-400/80' : 'text-rose-300/80'}`}>
+                    ⚡ Mô hình hoạt động: <strong className="font-mono text-white">{aiServerStatus.model}</strong>.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div className="p-2 rounded-lg bg-[#0e0e16] border border-[#222135] text-[10px] text-gray-400 leading-relaxed">
+              <strong className="text-gray-200">Cấu hình khóa Gemini phía máy chủ:</strong> Ứng dụng không hiển thị ô nhập khóa API trên giao diện trình duyệt. Hãy đặt biến <code className="text-amber-300">GEMINI_API_KEY</code> trong <strong className="text-gray-200">Settings &gt; Secrets</strong> (AI Studio) hoặc <strong className="text-gray-200">Environment Variables</strong> (Render). Khi chưa có khóa hợp lệ, bộ phân tích PEP 8 nội bộ luôn hoạt động tự động.
+            </div>
+          </div>
+
+          {/* 3. Cổng Máy chủ Cloud (Tùy chọn - Hoạt động cho cả Web & APK) */}
+          <div ref={serverSectionRef} className="p-2.5 rounded-xl bg-[#141420] border border-[#262538] space-y-2">
+            <div className="flex items-center justify-between gap-2">
               <span className="font-semibold text-gray-200 flex items-center space-x-1.5 text-xs">
                 <Globe className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <span>1. Cổng Máy chủ Cloud (Server Gateway)</span>
+                <span>3. Cổng Máy chủ Cloud (Tùy chọn)</span>
               </span>
-              <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border ${
+              <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border shrink-0 ${
                 isAndroidApkEnvironment()
                   ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
                   : 'bg-cyan-500/10 border-cyan-500/40 text-cyan-300'
@@ -611,7 +884,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <p className="text-[10px] text-gray-400 leading-tight">
-              Cổng máy chủ để kết nối: <strong className="text-gray-200">Trợ lý AI Gemini</strong>, <strong className="text-gray-200">CPython Native</strong> và <strong className="text-gray-200">Pip Package Manager</strong>.
+              {isAndroidApkEnvironment()
+                ? 'Chọn máy chủ Cloud cho Trợ lý AI Gemini, CPython Native và Pip trên APK (mặc định: py70632.onrender.com), hoặc chuyển sang chế độ ngoại tuyến Pyodide.'
+                : 'Để trống để dùng máy chủ nội bộ (/api/*), hoặc nhập URL máy chủ tùy chọn (ví dụ https://py70632.onrender.com) nếu muốn định tuyến sang backend riêng.'}
             </p>
 
             <div className="space-y-1.5">
@@ -624,7 +899,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     setApiTestResult(null);
                     setApiSaveSuccess(false);
                   }}
-                  placeholder="Cổng nội bộ (Mặc định: Tự động kết nối trực tiếp)"
+                  placeholder={isAndroidApkEnvironment() ? RENDER_CLOUD_API_URL : 'Mặc định: máy chủ nội bộ (/api/*)'}
                   className="flex-1 px-2.5 py-1.5 bg-[#0e0e18] border border-[#2b2a40] focus:border-cyan-400 rounded-lg text-xs font-mono text-gray-200 placeholder-gray-500 outline-none transition"
                 />
                 <button
@@ -635,6 +910,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     setApiTestResult(null);
                     const res = await testApiGatewayConnection(apiGatewayUrl);
                     setApiTestResult(res);
+                    if (res.ok && apiGatewayUrl.trim()) {
+                      setApiBaseUrl(apiGatewayUrl);
+                      setApiSaveSuccess(true);
+                      setTimeout(() => setApiSaveSuccess(false), 2500);
+                    }
                     setIsTestingApi(false);
                   }}
                   className="px-2.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 active:scale-95 disabled:opacity-50 text-white font-bold rounded-lg text-xs flex items-center space-x-1 transition cursor-pointer shrink-0"
@@ -644,23 +924,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
 
-              {/* Action buttons: Reset to Local, Save */}
-              <div className="flex items-center justify-between text-[11px] pt-0.5 flex-wrap gap-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiGatewayUrl('');
-                    setApiBaseUrl('');
-                    setApiTestResult(null);
-                    setApiSaveSuccess(true);
-                    setTimeout(() => setApiSaveSuccess(false), 2500);
-                  }}
-                  className="text-cyan-400 hover:text-cyan-300 flex items-center space-x-1 cursor-pointer transition text-[10px]"
-                  title="Dùng cổng nội bộ (khuyến nghị cho bản Web & Preview)"
-                >
-                  <RotateCcw className="w-2.5 h-2.5" />
-                  <span>Cổng Mặc Định Nội Bộ (Khuyến nghị)</span>
-                </button>
+              <div className="flex items-center justify-between text-[11px] pt-0.5 flex-wrap gap-1.5">
+                <div className="flex items-center space-x-2.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setApiGatewayUrl(RENDER_CLOUD_API_URL);
+                      setApiBaseUrl(RENDER_CLOUD_API_URL);
+                      setApiTestResult(null);
+                      setApiSaveSuccess(true);
+                      setTimeout(() => setApiSaveSuccess(false), 2500);
+                    }}
+                    className="text-emerald-400 hover:text-emerald-300 flex items-center space-x-1 cursor-pointer transition text-[10px]"
+                    title={`Chọn máy chủ ${RENDER_CLOUD_API_URL}`}
+                  >
+                    <Globe className="w-2.5 h-2.5" />
+                    <span>Chọn py70632.onrender.com</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setApiGatewayUrl('');
+                      setApiBaseUrl('');
+                      setApiTestResult(null);
+                      setApiSaveSuccess(true);
+                      setTimeout(() => setApiSaveSuccess(false), 2500);
+                    }}
+                    className="text-cyan-400 hover:text-cyan-300 flex items-center space-x-1 cursor-pointer transition text-[10px]"
+                    title={isAndroidApkEnvironment() ? 'Dùng ngoại tuyến Pyodide' : 'Khôi phục về máy chủ nội bộ (/api/*)'}
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" />
+                    <span>{isAndroidApkEnvironment() ? 'Chế độ ngoại tuyến' : 'Mặc định nội bộ'}</span>
+                  </button>
+                </div>
 
                 <button
                   type="button"
@@ -686,7 +983,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
 
-              {/* Status message */}
               {apiTestResult && (
                 <div
                   className={`p-2 rounded-lg text-[10px] flex items-start space-x-2 border transition ${
@@ -710,271 +1006,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
               )}
-            </div>
-          </div>
-
-          {/* 8. Trợ lý Trí tuệ Nhân tạo Google Gemini (Máy chủ Tích hợp) */}
-          <div ref={geminiSectionRef} className="p-2.5 rounded-xl bg-[#141420] border border-[#262538] space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-gray-200 flex items-center space-x-1.5 text-xs">
-                <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span>2. Trợ lý Trí tuệ Nhân tạo Gemini AI</span>
-              </span>
-              <span className="text-[9px] font-bold px-2 py-0.5 rounded-full border bg-amber-500/10 border-amber-500/40 text-amber-300">
-                ✨ Gemini 3.8 Flash & Live
-              </span>
-            </div>
-
-            <p className="text-[10px] text-gray-400 leading-tight">
-              Toàn bộ tính năng AI (Trò chuyện thông minh, Gỡ lỗi Python, Chuẩn hóa PEP 8, Tạo bài học và Live Audio) được hỗ trợ tự động trên Web và có thể cấu hình khóa API Gemini riêng cho bản APK Android độc lập.
-            </p>
-
-            <div className="space-y-2">
-              {/* Cổng nhập khóa Gemini API Key */}
-              <div className="p-2.5 rounded-lg bg-[#0e0e18] border border-[#2b2a40] space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-gray-200 flex items-center space-x-1.5 text-xs">
-                    <Key className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>Cổng nhập khóa Google Gemini API Key</span>
-                  </span>
-                  <span className={`text-[9px] font-mono px-1.5 py-0.2 rounded border ${
-                    geminiApiKeyInput.trim()
-                      ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
-                      : 'bg-gray-800/60 border-gray-700 text-gray-400'
-                  }`}>
-                    {geminiApiKeyInput.trim() ? 'Khóa cá nhân' : 'Khóa mặc định'}
-                  </span>
-                </div>
-
-                <div className="flex items-center space-x-1.5">
-                  <div className="relative flex-1">
-                    <input
-                      ref={geminiKeyInputRef}
-                      type={showKeyPassword ? 'text' : 'password'}
-                      value={geminiApiKeyInput}
-                      onChange={(e) => {
-                        const val = e.target.value.replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-                        setGeminiApiKeyInput(val);
-                        setKeyVerifyResult(null);
-                        setKeySaveSuccess(false);
-                      }}
-                      placeholder="Dán mã khóa API tại đây..."
-                      className="w-full pl-2.5 pr-8 py-1.5 bg-[#141420] border border-[#302f48] focus:border-amber-400 rounded-lg text-xs font-mono text-gray-100 placeholder-gray-500 outline-none transition select-text"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKeyPassword(!showKeyPassword)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 transition cursor-pointer"
-                      title={showKeyPassword ? 'Ẩn khóa' : 'Hiện khóa'}
-                    >
-                      {showKeyPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={isVerifyingKey}
-                    onClick={async () => {
-                      const cleanKey = geminiApiKeyInput.replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-                      setGeminiApiKeyInput(cleanKey);
-                      setIsVerifyingKey(true);
-                      setKeyVerifyResult(null);
-                      try {
-                        const result = await verifyGeminiApiKey(cleanKey);
-                        if (result.ok && cleanKey) {
-                          setGeminiApiKey(cleanKey);
-                          setKeySaveSuccess(true);
-                          setTimeout(() => setKeySaveSuccess(false), 3000);
-                          const liveStatus = await testServerAiStatus();
-                          setAiServerStatus(liveStatus);
-                        }
-                        setKeyVerifyResult({
-                          ok: result.ok,
-                          message: result.ok
-                            ? `${result.message} (Đã tự động lưu khóa)`
-                            : result.message,
-                        });
-                      } catch (err: any) {
-                        setKeyVerifyResult({
-                          ok: false,
-                          message: err?.message || 'Lỗi kiểm tra kết nối tới dịch vụ Google Gemini.',
-                        });
-                      } finally {
-                        setIsVerifyingKey(false);
-                      }
-                    }}
-                    className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 active:scale-95 disabled:opacity-50 font-bold rounded-lg text-xs flex items-center space-x-1 transition cursor-pointer shrink-0"
-                  >
-                    <ShieldCheck className={`w-3.5 h-3.5 ${isVerifyingKey ? 'animate-spin' : ''}`} />
-                    <span>{isVerifyingKey ? 'Đang thử...' : 'Kiểm tra'}</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] pt-0.5 flex-wrap gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setGeminiApiKeyInput('');
-                      setGeminiApiKey('');
-                      setKeyVerifyResult(null);
-                      setAiServerStatus(null);
-                      setKeySaveSuccess(true);
-                      setTimeout(() => setKeySaveSuccess(false), 2500);
-                    }}
-                    className="text-amber-400 hover:text-amber-300 flex items-center space-x-1 cursor-pointer transition text-[10px]"
-                    title="Xóa khóa tùy chỉnh để dùng kết nối mặc định"
-                  >
-                    <RotateCcw className="w-2.5 h-2.5" />
-                    <span>Dùng Khóa Tự Động Mặc Định</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isVerifyingKey}
-                    onClick={async () => {
-                      const clean = geminiApiKeyInput.replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-                      setGeminiApiKeyInput(clean);
-                      if (!clean) {
-                        setGeminiApiKey('');
-                        setKeyVerifyResult(null);
-                        setAiServerStatus(null);
-                        setKeySaveSuccess(true);
-                        setTimeout(() => setKeySaveSuccess(false), 2500);
-                        return;
-                      }
-                      if (!isLikelyGeminiApiKey(clean)) {
-                        const result = await verifyGeminiApiKey(clean);
-                        setKeyVerifyResult({ ok: false, message: result.message });
-                        return;
-                      }
-                      setGeminiApiKey(clean);
-                      setKeySaveSuccess(true);
-                      setTimeout(() => setKeySaveSuccess(false), 2500);
-                      setIsVerifyingKey(true);
-                      setKeyVerifyResult(null);
-                      try {
-                        const result = await verifyGeminiApiKey(clean);
-                        setKeyVerifyResult({ ok: result.ok, message: result.message });
-                        if (result.ok) {
-                          const liveStatus = await testServerAiStatus();
-                          setAiServerStatus(liveStatus);
-                        }
-                      } catch (_) {
-                      } finally {
-                        setIsVerifyingKey(false);
-                      }
-                    }}
-                    className={`px-3 py-1 rounded-lg font-bold transition flex items-center space-x-1 text-xs cursor-pointer disabled:opacity-50 ${
-                      keySaveSuccess
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
-                        : 'bg-amber-400 hover:bg-amber-300 text-black font-extrabold shadow'
-                    }`}
-                  >
-                    {keySaveSuccess ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Đã lưu khóa!</span>
-                      </>
-                    ) : (
-                      <span>Lưu Khóa API</span>
-                    )}
-                  </button>
-                </div>
-
-                {keyVerifyResult && (
-                  <div
-                    className={`p-2 rounded-lg text-[10px] flex items-start space-x-2 border transition ${
-                      keyVerifyResult.ok
-                        ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                        : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
-                    }`}
-                  >
-                    {keyVerifyResult.ok ? (
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                    )}
-                    <div className="flex-1 leading-tight font-medium">
-                      {keyVerifyResult.message}
-                    </div>
-                  </div>
-                )}
-
-                <div className="text-[10px] text-gray-400 space-y-1.5 pt-1.5 border-t border-[#252438]">
-                  <p>
-                    📋 <strong>Cách lấy khóa từ Google AI Studio:</strong> Tại danh sách khóa (trên <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-amber-400 underline hover:text-amber-300 font-bold">aistudio.google.com/app/apikey</a>), hãy bấm vào <strong>biểu tượng Sao chép</strong> (hình 2 ô vuông lồng nhau <span className="font-mono text-amber-300 font-bold">❐</span> ngay bên phải tên khóa như <em>...jspg</em> hoặc <em>...xfhw</em>), sau đó quay lại đây dán vào ô trên và bấm <strong>Lưu Khóa API</strong>.
-                  </p>
-                  <p>
-                    ☁️ <strong>Ghi chú:</strong> Khi đã lưu khóa, Trợ lý AI sẽ kết nối trực tiếp với Google Gemini 3.8 Flash trong cả phiên bản Web lẫn bản APK trên điện thoại.
-                  </p>
-                </div>
-              </div>
-
-              <div className="p-2.5 rounded-lg bg-[#0e0e18] border border-[#2b2a40] flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <div>
-                    <div className="text-[11px] text-gray-200 font-medium">
-                      Google Gemini 3.8 Flash & Live API
-                    </div>
-                    <div className="text-[9px] text-emerald-400 font-mono">
-                      Hỗ trợ trực tiếp máy chủ (Server-Side) & Bản APK độc lập
-                    </div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  disabled={isTestingAiServer}
-                  onClick={async () => {
-                    setIsTestingAiServer(true);
-                    setAiServerStatus(null);
-                    const res = await testServerAiStatus();
-                    setAiServerStatus(res);
-                    setIsTestingAiServer(false);
-                  }}
-                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 active:scale-95 disabled:opacity-50 font-bold rounded-lg text-xs flex items-center space-x-1 transition cursor-pointer shrink-0"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isTestingAiServer ? 'animate-spin' : ''}`} />
-                  <span>{isTestingAiServer ? 'Đang kiểm tra...' : 'Kiểm tra trạng thái'}</span>
-                </button>
-              </div>
-
-              {aiServerStatus && (
-                <div
-                  className={`p-2 rounded-lg text-[10px] flex items-start space-x-2 border transition ${
-                    aiServerStatus.ok
-                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                      : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
-                  }`}
-                >
-                  {aiServerStatus.ok ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                  )}
-                  <div className="flex-1 leading-tight space-y-0.5">
-                    <div className="font-semibold">{aiServerStatus.message}</div>
-                    <p className={`text-[10px] ${aiServerStatus.ok ? 'text-emerald-400/80' : 'text-rose-300/80'}`}>
-                      ⚡ Mô hình hoạt động: <strong className="font-mono text-white">{aiServerStatus.model}</strong>.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              <div className="p-2 rounded-lg bg-[#0e0e16] border border-[#222135] text-[10px] text-gray-400 space-y-1">
-                <div className="font-semibold text-gray-300 flex items-center space-x-1">
-                  <span>ℹ️ Tính năng AI trên Pydroid 3 Web & APK:</span>
-                </div>
-                <p>
-                  • <strong>Hỗ trợ Streaming & Live API:</strong> Phản hồi văn bản dạng luồng (Server-Sent Events) và kết nối âm thanh/văn bản thời gian thực qua WebSockets máy chủ.
-                </p>
-                <p>
-                  • <strong>Bảo mật & Tự động:</strong> Toàn bộ gọi API được ủy nhiệm qua máy chủ nền tảng, đảm bảo ứng dụng luôn hoạt động ổn định và nhất quán cho mọi người truy cập.
-                </p>
-                <p>
-                  • <strong>Chế độ dự phòng thông minh:</strong> Khi mất kết nối mạng, ứng dụng tự động kích hoạt bộ phân tích cú pháp Python chuẩn PEP 8 và hệ thống bài học nội bộ, đảm bảo không bao giờ bị gián đoạn.
-                </p>
-              </div>
             </div>
           </div>
 
@@ -1215,7 +1246,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             {!['pip', 'setuptools', 'wheel'].includes(pkg.name.toLowerCase()) && (
                               <button
                                 type="button"
-                                onClick={() => handleUninstallPackage(pkg.name)}
+                                onClick={() => setPendingUninstallPkg(pkg.name)}
                                 disabled={actionStatus === 'running'}
                                 className="p-1 bg-red-950/60 hover:bg-red-900 border border-red-500/30 text-red-300 rounded transition cursor-pointer disabled:opacity-50"
                                 title={`Gỡ bỏ ${pkg.name}`}
@@ -1228,6 +1259,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       ))
                     )}
                   </div>
+
+                  {pendingUninstallPkg && (
+                    <div className="p-2 rounded-lg bg-red-950/50 border border-red-500/40 flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-red-200 truncate">
+                        Gỡ bỏ thư viện <strong className="font-mono">{pendingUninstallPkg}</strong>?
+                      </span>
+                      <div className="flex items-center space-x-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setPendingUninstallPkg(null)}
+                          className="px-2 py-0.5 rounded bg-[#232236] hover:bg-[#31304b] text-gray-300 font-semibold cursor-pointer"
+                        >
+                          Hủy
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => executeUninstallPackage(pendingUninstallPkg)}
+                          className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white font-bold cursor-pointer"
+                        >
+                          Xác nhận gỡ
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

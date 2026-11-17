@@ -133,7 +133,7 @@ export const ExportApkModal: React.FC<ExportApkModalProps> = ({ isOpen, onClose 
             },
             android: {
               allowMixedContent: true,
-              captureInput: true,
+              captureInput: false,
               webContentsDebuggingEnabled: true,
             },
           },
@@ -351,18 +351,18 @@ jobs:
             )}
           </div>
 
-          {/* AI Assistants Direct & Cloud Gateway Status Banner */}
+          {/* Cloud Services & Offline Capabilities Banner */}
           <div className="p-3 bg-[#111c24] border border-cyan-500/40 rounded-xl flex items-start space-x-2.5 text-xs text-gray-300">
             <Globe className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <div className="flex items-center space-x-2">
-                <span className="font-bold text-cyan-300">Hỗ trợ Gemini AI trực tiếp trên bản APK Android</span>
+                <span className="font-bold text-cyan-300">Đồng bộ Google Drive & Cổng Cloud Gateway trên APK</span>
                 <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-300 font-bold">
                   ĐỒNG BỘ
                 </span>
               </div>
               <p className="text-[11px] text-gray-400 leading-relaxed">
-                Sau khi cài APK lên điện thoại, vào <strong className="text-amber-300">Cài đặt ⚙ ➔ Trợ lý AI Gemini</strong> và dán khóa Google Gemini API Key của bạn để kết nối trực tiếp tới Gemini 3.8 (hoặc nhập URL Cổng Cloud riêng nếu muốn dùng backend chung). Khi ngoại tuyến, bộ phân tích PEP 8 vẫn chạy mượt mà!
+                Sau khi cài APK lên điện thoại, vào <strong className="text-amber-300">Cài đặt ⚙ ➔ Tài khoản Google &amp; Gemini AI</strong> để đăng nhập bằng tài khoản Google và đồng bộ mã nguồn <code className="text-sky-300">.py</code> qua Google Drive, hoặc nhập URL Cổng Cloud Backend để dùng máy chủ Gemini AI &amp; CPython. Khi ngoại tuyến, Pyodide WASM và bộ phân tích PEP 8 vẫn hoạt động ổn định!
               </p>
             </div>
           </div>

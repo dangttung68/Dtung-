@@ -19,10 +19,7 @@ import {
   getApiBaseUrl,
   getApiHeaders,
   getWebSocketUrl,
-  getGeminiApiKey,
   isAndroidApkEnvironment,
-  isLikelyGeminiApiKey,
-  sanitizeGeminiApiKey,
 } from './apiConfig';
 import { AiDebugResult, LessonItem } from '../types';
 
@@ -32,16 +29,13 @@ export interface ChatMessageItem {
 }
 
 // ============================================================================
-// 1. API Key Validation from Environment Variables & Storage
+// 1. Server-Side AI Health / Diagnostic Helpers
 // ============================================================================
 
 export type ApiKeyValidationStatus = 'VALID' | 'MISSING' | 'INVALID_FORMAT';
 
 export type ApiKeySource =
-  | 'USER_STORAGE'
-  | 'VITE_GEMINI_API_KEY'
-  | 'GEMINI_API_KEY'
-  | 'PROCESS_ENV'
+  | 'SERVER_ENV'
   | 'NONE';
 
 export interface ApiKeyValidationResult {
@@ -55,126 +49,13 @@ export interface ApiKeyValidationResult {
   reason?: string;
 }
 
-/**
- * Explicitly validates the presence and format of the Gemini API key
- * across all potential environment variable sources and local storage.
- */
 export function validateEnvironmentApiKey(): ApiKeyValidationResult {
-  let rawKey: string | undefined;
-  let source: ApiKeySource = 'NONE';
-
-  // 1. Check user-configured key from local storage (Settings modal)
-  const userKey = getGeminiApiKey();
-  if (userKey && userKey.trim()) {
-    rawKey = userKey;
-    source = 'USER_STORAGE';
-  }
-
-  // 2. Check import.meta.env.VITE_GEMINI_API_KEY (Vite client standard)
-  if (!rawKey) {
-    try {
-      if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) {
-        rawKey = import.meta.env.VITE_GEMINI_API_KEY;
-        source = 'VITE_GEMINI_API_KEY';
-      }
-    } catch (_) {}
-  }
-
-  // 3. Check import.meta.env.GEMINI_API_KEY (Vite client alias)
-  if (!rawKey) {
-    try {
-      if (typeof import.meta !== 'undefined' && (import.meta.env as any)?.GEMINI_API_KEY) {
-        rawKey = (import.meta.env as any).GEMINI_API_KEY;
-        source = 'GEMINI_API_KEY';
-      }
-    } catch (_) {}
-  }
-
-  // 4. Check process.env.GEMINI_API_KEY or process.env.VITE_GEMINI_API_KEY (Node/polyfilled context)
-  if (!rawKey) {
-    try {
-      if (typeof process !== 'undefined' && process.env) {
-        if (process.env.GEMINI_API_KEY) {
-          rawKey = process.env.GEMINI_API_KEY;
-          source = 'PROCESS_ENV';
-        } else if (process.env.VITE_GEMINI_API_KEY) {
-          rawKey = process.env.VITE_GEMINI_API_KEY;
-          source = 'PROCESS_ENV';
-        }
-      }
-    } catch (_) {}
-  }
-
-  // If no key found in any location
-  if (!rawKey || !rawKey.trim()) {
-    return {
-      isValid: false,
-      status: 'MISSING',
-      source: 'NONE',
-      keyLength: 0,
-      reason: 'Khóa API không tồn tại. Không tìm thấy khóa trong biến môi trường (VITE_GEMINI_API_KEY, GEMINI_API_KEY) hoặc Cài đặt.',
-    };
-  }
-
-  // Sanitize: strip whitespace, zero-width chars, newlines, quotes
-  const sanitized = sanitizeGeminiApiKey(rawKey);
-
-  // Create masked preview (e.g. AIzaSy...xxxx)
-  const maskedKey = sanitized.length > 10
-    ? `${sanitized.slice(0, 6)}...${sanitized.slice(-4)}`
-    : (sanitized.length > 0 ? `${sanitized.slice(0, 3)}...` : '');
-
-  // Check 1: User copied truncated ellipsis preview from Google AI Studio table (e.g. "...jspg")
-  if (sanitized.includes('...') || sanitized.startsWith('.')) {
-    return {
-      isValid: false,
-      status: 'INVALID_FORMAT',
-      source,
-      rawKey,
-      sanitizedKey: sanitized,
-      maskedKey,
-      keyLength: sanitized.length,
-      reason: `Khóa API chứa dấu ba chấm (...) [${sanitized}]. Bạn đã sao chép phần xem trước rút gọn từ Google AI Studio thay vì bấm nút Copy để lấy toàn bộ khóa.`,
-    };
-  }
-
-  // Check 2: Minimum length constraint (Google API keys are ~39 characters; minimum acceptable is 20)
-  if (sanitized.length < 20) {
-    return {
-      isValid: false,
-      status: 'INVALID_FORMAT',
-      source,
-      rawKey,
-      sanitizedKey: sanitized,
-      maskedKey,
-      keyLength: sanitized.length,
-      reason: `Độ dài khóa quá ngắn (${sanitized.length} ký tự). Khóa Google Gemini API chuẩn thường có khoảng 39 ký tự.`,
-    };
-  }
-
-  // Check 3: Character set constraint (alphanumeric, hyphens, underscores)
-  if (!/^[A-Za-z0-9_.-]+$/.test(sanitized)) {
-    return {
-      isValid: false,
-      status: 'INVALID_FORMAT',
-      source,
-      rawKey,
-      sanitizedKey: sanitized,
-      maskedKey,
-      keyLength: sanitized.length,
-      reason: 'Khóa API chứa ký tự không hợp lệ. Khóa chỉ được chứa các ký tự chữ cái, số, gạch nối (-) hoặc gạch dưới (_).',
-    };
-  }
-
   return {
     isValid: true,
     status: 'VALID',
-    source,
-    rawKey,
-    sanitizedKey: sanitized,
-    maskedKey,
-    keyLength: sanitized.length,
-    reason: 'Khóa API hợp lệ về định dạng và độ dài.',
+    source: 'SERVER_ENV',
+    keyLength: 0,
+    reason: 'Khóa Gemini API được quản lý bảo mật phía máy chủ (Server-Side Secrets).',
   };
 }
 
@@ -218,15 +99,14 @@ export function classifyAiError(
     lowerErr.includes('key is missing') ||
     lowerErr.includes('api_key');
 
-  if (hasInvalidKeyMarker || keyResult.status === 'MISSING' || keyResult.status === 'INVALID_FORMAT') {
-    const keyReason = keyResult.reason || 'Khóa Gemini API không hợp lệ hoặc chưa được cung cấp.';
+  if (hasInvalidKeyMarker) {
     return {
       type: 'INVALID_KEY',
-      title: 'Khóa API không hợp lệ (INVALID_KEY)',
-      summary: `Yêu cầu AI bị từ chối do khóa API: ${keyReason}`,
+      title: 'Khóa API máy chủ không hợp lệ (INVALID_KEY)',
+      summary: 'Máy chủ Google Gemini từ chối khóa GEMINI_API_KEY được cấu hình trên máy chủ.',
       httpStatus: status || 401,
       originalError: err,
-      remediation: 'Truy cập Google AI Studio (aistudio.google.com/app/apikey), bấm biểu tượng Copy bên cạnh khóa để sao chép đầy đủ chuỗi khóa (~39 ký tự, thường bắt đầu bằng AIzaSy) và dán vào phần Cài đặt > Khóa Google Gemini API Key.',
+      remediation: 'Kiểm tra và cập nhật GEMINI_API_KEY trong phần Settings > Secrets của dự án AI Studio.',
     };
   }
 
@@ -383,687 +263,11 @@ export function logAiDiagnosticToTerminal(payload: AiDiagnosticPayload): Classif
   return classified;
 }
 
-// ============================================================================
-// 3. Direct Gemini REST & Streaming Engine (Standalone APK & Mobile Web)
-// ============================================================================
-
-const DISCOVERED_MODELS_STORAGE_KEY = 'pydroid_gemini_discovered_models';
-
-function getValidUserApiKey(): string | undefined {
-  const userKey = getGeminiApiKey();
-  if (userKey && isLikelyGeminiApiKey(userKey)) {
-    return sanitizeGeminiApiKey(userKey);
-  }
-  const envValidation = validateEnvironmentApiKey();
-  if (envValidation.isValid && envValidation.sanitizedKey) {
-    return envValidation.sanitizedKey;
-  }
-  return undefined;
-}
-
-function getCachedDiscoveredModels(): string[] {
-  try {
-    const raw = localStorage.getItem(DISCOVERED_MODELS_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter((m) => typeof m === 'string' && m.trim().length > 0);
-      }
-    }
-  } catch (_) {}
-  return [];
-}
-
-function saveDiscoveredModels(models: string[]): void {
-  try {
-    if (models.length > 0) {
-      localStorage.setItem(DISCOVERED_MODELS_STORAGE_KEY, JSON.stringify(models.slice(0, 8)));
-    }
-  } catch (_) {}
-}
-
-function pickSupportedGeminiTextModels(rawModels: any[]): string[] {
-  if (!Array.isArray(rawModels)) return [];
-  const filtered = rawModels
-    .filter((m) => {
-      const name = String(m?.name || '').toLowerCase();
-      const methods: string[] = Array.isArray(m?.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
-      if (!name.includes('gemini')) return false;
-      if (methods.length > 0 && !methods.includes('generateContent')) return false;
-      if (
-        name.includes('embedding') ||
-        name.includes('imagen') ||
-        name.includes('veo') ||
-        name.includes('tts') ||
-        name.includes('live') ||
-        name.includes('audio') ||
-        name.includes('robotics') ||
-        name.includes('aqa') ||
-        name.includes('gemma')
-      ) {
-        return false;
-      }
-      return true;
-    })
-    .map((m) => String(m.name).replace(/^models\//, ''));
-
-  const score = (name: string): number => {
-    if (name === 'gemini-4-hydrogen') return 100;
-    if (name === 'gemini-3.8-flash') return 95;
-    if (name === 'gemini-3.1-flash-lite') return 90;
-    if (name === 'gemini-flash-latest') return 85;
-    if (name.includes('flash') && !name.includes('1.5') && !name.includes('2.0')) return 80;
-    if (name.includes('flash')) return 70;
-    if (name.includes('4-argon') || name.includes('pro')) return 60;
-    return 40;
-  };
-
-  return Array.from(new Set(filtered)).sort((a, b) => score(b) - score(a));
-}
-
-async function discoverDirectGeminiModels(apiKey: string): Promise<string[]> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      const picked = pickSupportedGeminiTextModels(data?.models || []);
-      if (picked.length > 0) {
-        saveDiscoveredModels(picked);
-        return picked;
-      }
-    }
-  } catch (_) {}
-  return [];
-}
-
-/**
- * Direct Google Gemini REST API Key Verification
- * Directly contacts Google's Generative Language API from the client (APK / browser).
- */
-export async function verifyDirectGeminiKey(
-  cleanKey: string
-): Promise<{ ok: boolean; message: string; model?: string }> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`;
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      const models: any[] = Array.isArray(data.models) ? data.models : [];
-      const supportedModels = pickSupportedGeminiTextModels(models);
-      if (supportedModels.length > 0) {
-        saveDiscoveredModels(supportedModels);
-      }
-      const activeModel = supportedModels[0] || 'gemini-3.8-flash';
-
-      return {
-        ok: true,
-        model: activeModel,
-        message: `Khóa Google Gemini API hợp lệ và kết nối trực tiếp thành công (${activeModel})!`,
-      };
-    }
-
-    const errData = await res.json().catch(() => null);
-    const errStatus = res.status;
-    const errMsg = errData?.error?.message || '';
-
-    if (errStatus === 400 || errMsg.includes('API_KEY_INVALID') || errMsg.includes('API key not valid')) {
-      return {
-        ok: false,
-        message: 'Khóa API không hợp lệ. Vui lòng kiểm tra lại chuỗi khóa đã sao chép từ Google AI Studio (bắt đầu bằng AIzaSy...).',
-      };
-    }
-    if (errStatus === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('Quota exceeded')) {
-      return {
-        ok: false,
-        message: 'Khóa API đã tạm hết hạn mức (Quota Exceeded 429). Vui lòng thử lại sau ít phút hoặc dùng khóa từ dự án có bật thanh toán.',
-      };
-    }
-    if (errStatus === 403 || errMsg.includes('PERMISSION_DENIED')) {
-      return {
-        ok: false,
-        message: 'Khóa API bị từ chối quyền truy cập (403 Permission Denied). Hãy đảm bảo dịch vụ Generative Language API đã được bật trong Google Cloud.',
-      };
-    }
-
-    return {
-      ok: false,
-      message: errMsg || `Google Gemini API phản hồi mã lỗi HTTP ${errStatus}.`,
-    };
-  } catch (directErr: any) {
-    if (directErr?.name === 'AbortError') {
-      return {
-        ok: false,
-        message: 'Quá thời gian kết nối tới Google Gemini (timeout sau 12 giây). Vui lòng kiểm tra kết nối mạng của bạn.',
-      };
-    }
-    return {
-      ok: false,
-      message: `Không thể kết nối đến máy chủ Google Gemini: ${directErr?.message || 'Lỗi mạng'}. Vui lòng kiểm tra kết nối Wi-Fi hoặc 4G/5G.`,
-    };
-  }
-}
-
-/**
- * Verifies a Google Gemini API key.
- * - On Android APK without a Cloud Gateway: executes direct Google Gemini REST verification.
- * - On Web or APK with Cloud Gateway: checks server proxy (/api/ai/verify-key) first, and falls back to direct verification.
- */
-export async function verifyGeminiApiKey(
-  rawKey: string
-): Promise<{ ok: boolean; message: string; model?: string }> {
-  const cleanKey = sanitizeGeminiApiKey(rawKey || '');
-
-  if (!cleanKey) {
-    return {
-      ok: false,
-      message: 'Vui lòng nhập khóa Google Gemini API.',
-    };
-  }
-
-  if (cleanKey.includes('...') || cleanKey.startsWith('.')) {
-    return {
-      ok: false,
-      message:
-        'Khóa API chứa dấu ba chấm (...). Bạn đã sao chép phần xem trước rút gọn từ bảng Google AI Studio thay vì bấm nút Copy để lấy toàn bộ mã khóa (~39 ký tự).',
-    };
-  }
-
-  if (cleanKey.length < 20) {
-    return {
-      ok: false,
-      message: `Độ dài khóa quá ngắn (${cleanKey.length} ký tự). Vui lòng sao chép lại toàn bộ khóa từ Google AI Studio.`,
-    };
-  }
-
-  // In standalone Android APK without custom Cloud Gateway: perform direct verification to Google's API
-  if (isAndroidApkEnvironment() && !getApiBaseUrl()) {
-    return await verifyDirectGeminiKey(cleanKey);
-  }
-
-  // In Web environment (or APK with Cloud Gateway): try server proxy (/api/ai/verify-key)
-  try {
-    const serverRes = await fetch(getApiUrl('/api/ai/verify-key'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cleanKey }),
-    });
-
-    const contentType = serverRes.headers.get('content-type') || '';
-    if (serverRes.ok && contentType.includes('application/json')) {
-      const data = await serverRes.json();
-      return {
-        ok: data.ok,
-        message: data.message || 'Khóa Google Gemini API hợp lệ và kết nối thành công!',
-        model: data.model,
-      };
-    }
-
-    if (contentType.includes('application/json')) {
-      const errData = await serverRes.json().catch(() => null);
-      if (errData?.message) {
-        return {
-          ok: false,
-          message: errData.message,
-        };
-      }
-    }
-  } catch (_) {
-    // Fallback directly to Google Gemini if server route is unreachable
-  }
-
-  return await verifyDirectGeminiKey(cleanKey);
-}
-
-// Candidate models for direct client-side fallback (APK standalone mode)
+// Standard recommended Gemini models (server-side fallback reference)
 export const DIRECT_CANDIDATE_MODELS = [
-  'gemini-flash-latest',
-  'gemini-3.8-flash',
-  'gemini-3.1-flash-lite',
   'gemini-4-hydrogen',
-  'gemini-4-argon',
+  'gemini-3.1-flash-lite',
 ];
-
-// Mỗi mô hình có thời gian chờ riêng: mô hình nào im lặng quá lâu thì bỏ qua, thử mô hình kế tiếp
-const PER_MODEL_FIRST_BYTE_MS = 20000;
-const PER_MODEL_SEND_MS = 30000;
-
-function linkedController(parent?: AbortSignal): AbortController {
-  const c = new AbortController();
-  if (parent) {
-    if (parent.aborted) c.abort();
-    else parent.addEventListener('abort', () => c.abort());
-  }
-  return c;
-}
-
-function extractTextFromGeminiPayload(data: any): string {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return '';
-  return parts
-    .filter((p: any) => !p?.thought && typeof p?.text === 'string')
-    .map((p: any) => p.text)
-    .join('');
-}
-
-function buildNormalizedDirectContents(
-  messages: ChatMessageItem[],
-  code: string,
-  instruction = '',
-  errorText = ''
-): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
-  const rawMessages = Array.isArray(messages) ? messages : [];
-  const lastUserMsg =
-    [...rawMessages].reverse().find((m) => m && m.sender === 'user') || rawMessages[rawMessages.length - 1];
-  const lastUserText = String(lastUserMsg?.text || '').trim() ||
-    (code ? `Phân tích và tối ưu mã nguồn này:\n\`\`\`python\n${code}\n\`\`\`` : 'Xin chào!');
-
-  // Normalize previous turns: first turn MUST be 'user' and roles MUST alternate
-  const previousTurns = rawMessages.slice(0, -1);
-  const normalizedHistory: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-
-  for (const item of previousTurns) {
-    if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
-    const role: 'user' | 'model' = item.sender === 'assistant' ? 'model' : 'user';
-    const text = item.text.trim();
-
-    if (normalizedHistory.length === 0 && role === 'model') {
-      continue;
-    }
-
-    if (normalizedHistory.length > 0 && normalizedHistory[normalizedHistory.length - 1].role === role) {
-      normalizedHistory[normalizedHistory.length - 1].parts[0].text += `\n\n${text}`;
-    } else {
-      normalizedHistory.push({ role, parts: [{ text }] });
-    }
-  }
-
-  while (normalizedHistory.length > 0 && normalizedHistory[normalizedHistory.length - 1].role === 'user') {
-    normalizedHistory.pop();
-  }
-
-  const contextParts: string[] = [];
-  if (code && code.trim()) {
-    contextParts.push(`\n\n[MÃ NGUỒN HIỆN TẠI TRONG EDITOR]:\n\`\`\`python\n${code}\n\`\`\``);
-  }
-  if (errorText && errorText.trim()) {
-    contextParts.push(`\n\n[THÔNG BÁO LỖI RUNTIME / TERMINAL]:\n\`\`\`\n${errorText}\n\`\`\``);
-  }
-  if (instruction) {
-    contextParts.push(`\n\n[YÊU CẦU ĐẶC BIỆT]: ${instruction}`);
-  }
-
-  normalizedHistory.push({
-    role: 'user',
-    parts: [{ text: `${lastUserText}${contextParts.join('')}` }],
-  });
-
-  return normalizedHistory;
-}
-
-function isPermanentDirectKeyError(status: number, errMsg: string): boolean {
-  const lower = errMsg.toLowerCase();
-  return (
-    status === 401 ||
-    status === 403 ||
-    lower.includes('api_key_invalid') ||
-    lower.includes('api key not valid') ||
-    lower.includes('api key expired') ||
-    lower.includes('permission_denied')
-  );
-}
-
-/**
- * Direct Gemini REST streaming request for standalone APK
- */
-export async function streamDirectGeminiRest(
-  apiKey: string,
-  options: {
-    code: string;
-    messages: ChatMessageItem[];
-    instruction?: string;
-    errorText?: string;
-  },
-  onChunk: (accumulatedText: string) => void,
-  signal?: AbortSignal
-): Promise<string> {
-  const { code, messages, instruction = '', errorText = '' } = options;
-
-  const systemText = `Bạn là Trợ lý AI Lập trình Python (Gemini 3.8 Flash) của Pydroid 3 Web & Android.
-Nhiệm vụ: Giải thích code dễ hiểu, sửa lỗi cú pháp & runtime chuẩn PEP 8 (thụt lề 4 khoảng trắng), viết code Python hoàn chỉnh.
-Mỗi khi cung cấp mã nguồn Python hoàn chỉnh hoặc đã sửa lỗi, hãy bao bọc trong khối code \`\`\`python ... \`\`\` để người dùng có thể nhấn nút "Áp dụng vào Editor" một chạm.
-Tránh viết tắt hay bỏ dở mã nguồn.`;
-
-  const contents = buildNormalizedDirectContents(messages, code, instruction, errorText);
-
-  let accumulated = '';
-  let lastError: any = null;
-
-  const cachedModels = getCachedDiscoveredModels();
-  const initialCandidates = Array.from(new Set([...DIRECT_CANDIDATE_MODELS, ...cachedModels]));
-  const triedModels = new Set<string>();
-
-  const tryStreamModelInner = async (
-    model: string,
-    includeThinking: boolean,
-    sig?: AbortSignal,
-    onFirstByte?: () => void
-  ): Promise<boolean> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
-    const payload: any = {
-      contents,
-      systemInstruction: {
-        parts: [{ text: systemText }],
-      },
-    };
-
-    if (includeThinking && (model.includes('3.8') || model.includes('gemini-4'))) {
-      payload.generationConfig = {
-        thinkingConfig: { thinkingLevel: 'LOW' },
-      };
-    }
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: sig || signal,
-    });
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => null);
-      const errMsg = errJson?.error?.message || `HTTP ${res.status}`;
-      lastError = new Error(errMsg);
-
-      if (isPermanentDirectKeyError(res.status, errMsg)) {
-        throw lastError;
-      }
-
-      // If 400 failed while thinkingConfig was present, retry same model without thinkingConfig
-      if (res.status === 400 && includeThinking && payload.generationConfig?.thinkingConfig) {
-        return await tryStreamModel(model, false);
-      }
-
-      return false;
-    }
-
-    if (!res.body) {
-      // Fallback if WebView does not expose ReadableStream body
-      const rawText = await res.text().catch(() => '');
-      if (rawText) {
-        try {
-          const parsed = JSON.parse(rawText);
-          const items = Array.isArray(parsed) ? parsed : [parsed];
-          for (const item of items) {
-            const chunk = extractTextFromGeminiPayload(item);
-            if (chunk) accumulated += chunk;
-          }
-          if (accumulated.trim()) {
-            onChunk(accumulated);
-            return true;
-          }
-        } catch (_) {}
-      }
-      return false;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      onFirstByte?.();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const jsonStr = trimmed.slice(5).trim();
-        if (!jsonStr || jsonStr === '[DONE]') continue;
-        try {
-          const data = JSON.parse(jsonStr);
-          const chunk = extractTextFromGeminiPayload(data);
-          if (chunk) {
-            accumulated += chunk;
-            onChunk(accumulated);
-          }
-        } catch (_) {}
-      }
-    }
-
-    if (buffer.trim().startsWith('data:')) {
-      const jsonStr = buffer.trim().slice(5).trim();
-      if (jsonStr && jsonStr !== '[DONE]') {
-        try {
-          const data = JSON.parse(jsonStr);
-          const chunk = extractTextFromGeminiPayload(data);
-          if (chunk) {
-            accumulated += chunk;
-            onChunk(accumulated);
-          }
-        } catch (_) {}
-      }
-    }
-
-    return accumulated.trim().length > 0;
-  };
-
-  const tryStreamModel = async (model: string, includeThinking: boolean): Promise<boolean> => {
-    const ctrl = linkedController(signal);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      ctrl.abort();
-    }, PER_MODEL_FIRST_BYTE_MS);
-    try {
-      return await tryStreamModelInner(model, includeThinking, ctrl.signal, () => clearTimeout(timer));
-    } catch (e: any) {
-      if (timedOut && !signal?.aborted) {
-        lastError = new Error(`Mô hình ${model} không phản hồi sau ${PER_MODEL_FIRST_BYTE_MS / 1000} giây`);
-        return false;
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-
-  for (const model of initialCandidates) {
-    triedModels.add(model);
-    try {
-      const ok = await tryStreamModel(model, true);
-      if (ok) {
-        saveDiscoveredModels([model, ...cachedModels.filter((m) => m !== model)]);
-        return accumulated;
-      }
-    } catch (err: any) {
-      if (signal?.aborted) throw err;
-      lastError = err;
-      if (isPermanentDirectKeyError(0, String(err?.message || ''))) {
-        throw err;
-      }
-    }
-  }
-
-  // Dynamic model discovery fallback if hardcoded/cached candidates didn't work for this user key
-  if (!accumulated.trim() && !signal?.aborted) {
-    const discovered = await discoverDirectGeminiModels(apiKey);
-    for (const model of discovered) {
-      if (triedModels.has(model)) continue;
-      triedModels.add(model);
-      try {
-        const ok = await tryStreamModel(model, false);
-        if (ok) {
-          saveDiscoveredModels([model, ...cachedModels.filter((m) => m !== model)]);
-          return accumulated;
-        }
-      } catch (err: any) {
-        if (signal?.aborted) throw err;
-        lastError = err;
-        if (isPermanentDirectKeyError(0, String(err?.message || ''))) {
-          throw err;
-        }
-      }
-    }
-  }
-
-  // Final non-streaming fallback if SSE streaming wasn't supported by Android WebView / proxy
-  if (!accumulated.trim() && !signal?.aborted) {
-    try {
-      const lastContent = contents[contents.length - 1]?.parts?.[0]?.text || 'Xin chào!';
-      const nonStreamReply = await sendDirectGeminiRest(apiKey, lastContent, systemText, signal);
-      if (nonStreamReply && nonStreamReply.trim()) {
-        onChunk(nonStreamReply);
-        return nonStreamReply;
-      }
-    } catch (nonStreamErr: any) {
-      lastError = nonStreamErr;
-    }
-  }
-
-  if (accumulated.trim()) {
-    return accumulated;
-  }
-
-  throw (lastError || new Error('Không thể kết nối trực tiếp đến Google Gemini API'));
-}
-
-/**
- * Direct non-streaming Gemini REST request
- */
-export async function sendDirectGeminiRest(
-  apiKey: string,
-  prompt: string,
-  systemText?: string,
-  signal?: AbortSignal
-): Promise<string> {
-  let lastError: any = null;
-
-  const cachedModels = getCachedDiscoveredModels();
-  const initialCandidates = Array.from(new Set([...DIRECT_CANDIDATE_MODELS, ...cachedModels]));
-  const triedModels = new Set<string>();
-
-  const trySendModelInner = async (
-    model: string,
-    includeThinking: boolean,
-    sig?: AbortSignal
-  ): Promise<string | null> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const payload: any = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    };
-    if (systemText) {
-      payload.systemInstruction = { parts: [{ text: systemText }] };
-    }
-    if (includeThinking && (model.includes('3.8') || model.includes('gemini-4'))) {
-      payload.generationConfig = {
-        thinkingConfig: { thinkingLevel: 'LOW' },
-      };
-    }
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: sig || signal,
-    });
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => null);
-      const errMsg = errJson?.error?.message || `HTTP ${res.status}`;
-      lastError = new Error(errMsg);
-
-      if (isPermanentDirectKeyError(res.status, errMsg)) {
-        throw lastError;
-      }
-
-      if (res.status === 400 && includeThinking && payload.generationConfig?.thinkingConfig) {
-        return await trySendModel(model, false);
-      }
-
-      return null;
-    }
-
-    const data = await res.json();
-    const text = extractTextFromGeminiPayload(data);
-    return text && text.trim() ? text : null;
-  };
-
-  const trySendModel = async (model: string, includeThinking: boolean): Promise<string | null> => {
-    const ctrl = linkedController(signal);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      ctrl.abort();
-    }, PER_MODEL_SEND_MS);
-    try {
-      return await trySendModelInner(model, includeThinking, ctrl.signal);
-    } catch (e: any) {
-      if (timedOut && !signal?.aborted) {
-        lastError = new Error(`Mô hình ${model} không phản hồi sau ${PER_MODEL_SEND_MS / 1000} giây`);
-        return null;
-      }
-      throw e;
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-
-  for (const model of initialCandidates) {
-    triedModels.add(model);
-    try {
-      const text = await trySendModel(model, true);
-      if (text) {
-        saveDiscoveredModels([model, ...cachedModels.filter((m) => m !== model)]);
-        return text;
-      }
-    } catch (err: any) {
-      if (signal?.aborted) throw err;
-      lastError = err;
-      if (isPermanentDirectKeyError(0, String(err?.message || ''))) {
-        throw err;
-      }
-    }
-  }
-
-  // Dynamic model discovery fallback
-  if (!signal?.aborted) {
-    const discovered = await discoverDirectGeminiModels(apiKey);
-    for (const model of discovered) {
-      if (triedModels.has(model)) continue;
-      triedModels.add(model);
-      try {
-        const text = await trySendModel(model, false);
-        if (text) {
-          saveDiscoveredModels([model, ...cachedModels.filter((m) => m !== model)]);
-          return text;
-        }
-      } catch (err: any) {
-        if (signal?.aborted) throw err;
-        lastError = err;
-        if (isPermanentDirectKeyError(0, String(err?.message || ''))) {
-          throw err;
-        }
-      }
-    }
-  }
-
-  throw (lastError || new Error('Không nhận được phản hồi từ Gemini API'));
-}
 
 // ============================================================================
 // 4. Local Rule-Based PEP 8 Code Formatter & Analyzer (Zero Crash Guarantee)
@@ -1262,7 +466,6 @@ export async function sendAiChatRequest(options: {
   const { code, messages, instruction = '', errorText = '' } = options;
   const isApk = isAndroidApkEnvironment();
   const hasCloudGateway = Boolean(getApiBaseUrl());
-  const userApiKey = getValidUserApiKey();
   const lastUserText = messages[messages.length - 1]?.text || '';
   let lastFailureNotice = '';
 
@@ -1280,7 +483,6 @@ export async function sendAiChatRequest(options: {
           messages,
           instruction,
           errorText,
-          ...(userApiKey ? { geminiApiKey: userApiKey } : {}),
         }),
         signal: controller.signal,
       });
@@ -1299,34 +501,10 @@ export async function sendAiChatRequest(options: {
     }
   }
 
-  // 2. Android APK standalone mode with user API key: call Google Gemini REST directly
-  if (isApk && userApiKey) {
-    try {
-      const controller = new AbortController();
-      const timeoutTimer = setTimeout(() => controller.abort(), 120000);
-      const userPrompt = lastUserText || 'Hãy phân tích mã nguồn này.';
-      const directReply = await sendDirectGeminiRest(
-        userApiKey,
-        `[MÃ NGUỒN]:\n\`\`\`python\n${code}\n\`\`\`\n\n[LỖI RUNTIME NẾU CÓ]:\n${errorText}\n\n[YÊU CẦU]: ${userPrompt} ${instruction ? `(${instruction})` : ''}`,
-        `Bạn là Trợ lý AI Lập trình Python (Gemini) của Pydroid 3 Android & Web. Chuẩn hóa PEP 8, hướng dẫn chi tiết.`,
-        controller.signal
-      );
-      clearTimeout(timeoutTimer);
-      if (directReply && directReply.trim()) return directReply;
-    } catch (directErr: any) {
-      const classified = logAiDiagnosticToTerminal({
-        endpoint: 'https://generativelanguage.googleapis.com (Direct REST)',
-        operation: 'sendAiChatRequest:DirectRest',
-        error: directErr,
-      });
-      lastFailureNotice = `${classified.title}: ${directErr?.message || classified.summary}`;
-    }
-  }
-
-  // 3. Smart local fallback with clear diagnostic header (never falsely claim live Gemini connection)
+  // 2. Smart local fallback with honest diagnostic header
   const localBody = getSmartLocalChatResponse(lastUserText, code, instruction, errorText);
-  if (isApk && !userApiKey && !hasCloudGateway) {
-    return `📱 **Bản APK chưa kết nối Google Gemini API** (đang dùng bộ phân tích PEP 8 nội bộ).\n👉 Hãy bấm nút **"🔑 Nhập khóa AI"** ở banner phía trên (hoặc vào **Cài đặt ⚙ ➔ 2. Trợ lý AI Gemini**) để dán khóa API từ ` + '`aistudio.google.com/app/apikey`' + `.\n\n---\n\n${localBody}`;
+  if (isApk && !hasCloudGateway) {
+    return `📱 **Bản APK đang hoạt động ở chế độ ngoại tuyến PEP 8.**\n👉 Để sử dụng Gemini AI từ xa, hãy cấu hình **URL Cổng Cloud Backend** trong mục **Cài đặt ⚙**.\n\n---\n\n${localBody}`;
   }
   if (lastFailureNotice) {
     return `⚠️ **Chưa kết nối được Google Gemini AI:** ${lastFailureNotice}\n\n---\n\n${localBody}`;
@@ -1335,7 +513,7 @@ export async function sendAiChatRequest(options: {
 }
 
 // ============================================================================
-// 6. Real-time Streaming AI Chat Request via Server-Sent Events (SSE) & Direct REST
+// 6. Real-time Streaming AI Chat Request via Server-Sent Events (SSE)
 // ============================================================================
 
 export async function streamAiChatRequest(
@@ -1351,7 +529,6 @@ export async function streamAiChatRequest(
   const { code, messages, instruction = '', errorText = '' } = options;
   const isApk = isAndroidApkEnvironment();
   const hasCloudGateway = Boolean(getApiBaseUrl());
-  const userApiKey = getValidUserApiKey();
   const lastUserText = messages[messages.length - 1]?.text || '';
   let fullText = '';
   let lastFailureNotice = '';
@@ -1374,7 +551,6 @@ export async function streamAiChatRequest(
           messages,
           instruction,
           errorText,
-          ...(userApiKey ? { geminiApiKey: userApiKey } : {}),
         }),
         signal: clientAbortController.signal,
       });
@@ -1434,41 +610,11 @@ export async function streamAiChatRequest(
     }
   }
 
-  // 2. Android APK mode: stream directly via Google Gemini REST API using user API key
-  if (isApk && userApiKey) {
-    try {
-      const directAbortController = new AbortController();
-      const timeoutTimer = setTimeout(() => directAbortController.abort(), 120000);
-      if (signal) {
-        signal.addEventListener('abort', () => directAbortController.abort());
-      }
-
-      const directStreamText = await streamDirectGeminiRest(
-        userApiKey,
-        options,
-        onChunk,
-        directAbortController.signal
-      );
-      clearTimeout(timeoutTimer);
-      if (directStreamText && directStreamText.trim()) {
-        return directStreamText;
-      }
-    } catch (directErr: any) {
-      if (signal?.aborted) throw directErr;
-      const classified = logAiDiagnosticToTerminal({
-        endpoint: 'https://generativelanguage.googleapis.com (Direct SSE)',
-        operation: 'streamAiChatRequest:DirectRest',
-        error: directErr,
-      });
-      lastFailureNotice = `${classified.title}: ${directErr?.message || classified.summary}`;
-    }
-  }
-
-  // 3. Smart Local Fallback with honest connection diagnostic header
+  // 2. Smart Local Fallback with honest connection diagnostic header
   const localBody = getSmartLocalChatResponse(lastUserText, code, instruction, errorText);
   let finalFallback = localBody;
-  if (isApk && !userApiKey && !hasCloudGateway) {
-    finalFallback = `📱 **Bản APK chưa kết nối Google Gemini API** (đang dùng bộ phân tích PEP 8 nội bộ).\n👉 Hãy bấm nút **"🔑 Nhập khóa AI"** ở banner phía trên (hoặc vào **Cài đặt ⚙ ➔ 2. Trợ lý AI Gemini**) để dán khóa API từ ` + '`aistudio.google.com/app/apikey`' + `.\n\n---\n\n${localBody}`;
+  if (isApk && !hasCloudGateway) {
+    finalFallback = `📱 **Bản APK đang hoạt động ở chế độ ngoại tuyến PEP 8.**\n👉 Để sử dụng Gemini AI từ xa, hãy cấu hình **URL Cổng Cloud Backend** trong mục **Cài đặt ⚙**.\n\n---\n\n${localBody}`;
   } else if (lastFailureNotice) {
     finalFallback = `⚠️ **Chưa kết nối được Google Gemini AI:** ${lastFailureNotice}\n\n---\n\n${localBody}`;
   }
@@ -1477,26 +623,24 @@ export async function streamAiChatRequest(
 }
 
 // ============================================================================
-// 7. AI Debug Request via Server Route & Direct REST
+// 7. AI Debug Request via Server Route
 // ============================================================================
 
 export async function sendAiDebugRequest(code: string, errorText: string): Promise<AiDebugResult> {
   const isApk = isAndroidApkEnvironment();
   const hasCloudGateway = Boolean(getApiBaseUrl());
-  const userApiKey = getValidUserApiKey();
 
   // 1. Web mode OR APK with Cloud Gateway: Call server route (/api/ai/debug)
   if (!isApk || hasCloudGateway) {
     try {
       const controller = new AbortController();
-      const timeoutTimer = setTimeout(() => controller.abort(), 15000);
+      const timeoutTimer = setTimeout(() => controller.abort(), 20000);
       const res = await fetch(getApiUrl('/api/ai/debug'), {
         method: 'POST',
         headers: getApiHeaders(),
         body: JSON.stringify({
           code,
           errorText,
-          ...(userApiKey ? { geminiApiKey: userApiKey } : {}),
         }),
         signal: controller.signal,
       });
@@ -1525,57 +669,7 @@ export async function sendAiDebugRequest(code: string, errorText: string): Promi
     }
   }
 
-  // 2. Direct REST Debugging for standalone APK
-  if (isApk && userApiKey) {
-    try {
-      const controller = new AbortController();
-      const timeoutTimer = setTimeout(() => controller.abort(), 120000);
-      const prompt = `Bạn là Trợ lý Sửa lỗi Python chuyên sâu của Pydroid 3. Hãy phân tích lỗi sau và trả về DUY NHẤT một đối tượng JSON hợp lệ (không kèm markdown):
-{
-  "errorType": "Tên loại lỗi",
-  "vietnameseSummary": "Tóm tắt ngắn gọn lỗi bằng tiếng Việt",
-  "rootCause": "Nguyên nhân gốc rễ và cơ chế gây ra lỗi",
-  "tips": ["Mẹo 1", "Mẹo 2", "Mẹo 3"],
-  "fixedCode": "Mã nguồn Python hoàn chỉnh đã sửa 100% chuẩn PEP 8",
-  "diffExplanation": "Giải thích chi tiết các điểm đã sửa chữa"
-}
-
-[MÃ NGUỒN]:
-\`\`\`python
-${code}
-\`\`\`
-
-[THÔNG BÁO LỖI RUNTIME / TERMINAL]:
-\`\`\`
-${errorText}
-\`\`\``;
-
-      const reply = await sendDirectGeminiRest(userApiKey, prompt, undefined, controller.signal);
-      clearTimeout(timeoutTimer);
-      const jsonMatch = reply.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.fixedCode) {
-          return {
-            errorType: parsed.errorType || 'RuntimeError',
-            vietnameseSummary: parsed.vietnameseSummary || 'Đã phân tích lỗi thành công',
-            rootCause: parsed.rootCause || 'Lỗi cú pháp hoặc xử lý logic trong Python',
-            tips: Array.isArray(parsed.tips) ? parsed.tips : ['Kiểm tra chuẩn PEP 8'],
-            fixedCode: parsed.fixedCode,
-            diffExplanation: parsed.diffExplanation || 'Đã sửa chữa mã nguồn chuẩn mực PEP 8',
-          };
-        }
-      }
-    } catch (directErr) {
-      logAiDiagnosticToTerminal({
-        endpoint: 'https://generativelanguage.googleapis.com (Direct REST Debug)',
-        operation: 'sendAiDebugRequest:DirectRest',
-        error: directErr,
-      });
-    }
-  }
-
-  // 3. Fallback to local PEP 8 analyzer
+  // 2. Fallback to local PEP 8 analyzer
   const localAnalysis = analyzeAndFixLocally(code, errorText);
   const codeMatch = localAnalysis.match(/```python\s*([\s\S]*?)```/);
   const fixedCode = codeMatch && codeMatch[1] ? codeMatch[1].trim() : formatPep8Locally(code);
@@ -1600,7 +694,7 @@ ${errorText}
 }
 
 // ============================================================================
-// 8. AI Lessons Request via Server Route & Direct REST
+// 8. AI Lessons Request via Server Route
 // ============================================================================
 
 export async function sendAiLessonsRequest(options: {
@@ -1612,13 +706,12 @@ export async function sendAiLessonsRequest(options: {
   const { topic, level, existingTitles, completedTitles } = options;
   const isApk = isAndroidApkEnvironment();
   const hasCloudGateway = Boolean(getApiBaseUrl());
-  const userApiKey = getValidUserApiKey();
 
   // 1. Web mode OR APK with Cloud Gateway: Query server route (/api/ai/generate-lessons)
   if (!isApk || hasCloudGateway) {
     try {
       const controller = new AbortController();
-      const timeoutTimer = setTimeout(() => controller.abort(), 20000);
+      const timeoutTimer = setTimeout(() => controller.abort(), 25000);
       const res = await fetch(getApiUrl('/api/ai/generate-lessons'), {
         method: 'POST',
         headers: getApiHeaders(),
@@ -1627,7 +720,6 @@ export async function sendAiLessonsRequest(options: {
           level,
           existingTitles,
           completedTitles,
-          ...(userApiKey ? { geminiApiKey: userApiKey } : {}),
         }),
         signal: controller.signal,
       });
@@ -1656,45 +748,7 @@ export async function sendAiLessonsRequest(options: {
     }
   }
 
-  // 2. Direct REST for standalone APK if user key is available
-  if (isApk && userApiKey) {
-    try {
-      const controller = new AbortController();
-      const timeoutTimer = setTimeout(() => controller.abort(), 120000);
-      const prompt = `Bạn là Trợ lý Giáo trình Python của Pydroid 3. Hãy tạo 2 bài học thực hành về chủ đề "${topic}", cấp độ "${level}" (khác với các bài đã có: ${existingTitles.slice(-10).join(', ')}). Trả về DUY NHẤT một mảng JSON thuần:
-[
-  {
-    "id": "lesson_ai_${Date.now()}_1",
-    "title": "Tên bài học tiếng Việt",
-    "level": "${level}",
-    "description": "Mô tả bài toán",
-    "starterCode": "Mã nguồn khởi đầu (100% tên biến tiếng Việt)",
-    "solutionCode": "Mã nguồn giải hoàn chỉnh chuẩn PEP 8 (100% tên biến tiếng Việt)",
-    "explanation": "Giải thích chi tiết",
-    "sampleInput": "",
-    "sampleOutput": "Kết quả mẫu",
-    "completed": false
-  }
-]`;
-      const reply = await sendDirectGeminiRest(userApiKey, prompt, undefined, controller.signal);
-      clearTimeout(timeoutTimer);
-      const jsonMatch = reply.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed as LessonItem[];
-        }
-      }
-    } catch (directErr) {
-      logAiDiagnosticToTerminal({
-        endpoint: 'https://generativelanguage.googleapis.com (Direct REST Lessons)',
-        operation: 'sendAiLessonsRequest:DirectRest',
-        error: directErr,
-      });
-    }
-  }
-
-  // 3. Offline fallback curriculum
+  // 2. Offline fallback curriculum
   const timestamp = Date.now();
   return [
     {
@@ -1749,11 +803,7 @@ export function createLiveAiSession(callbacks: LiveAiSessionCallbacks) {
     };
   }
 
-  const userKey = getValidUserApiKey();
-  const rawWsUrl = getWebSocketUrl('/api/ai/live');
-  const wsUrl = userKey
-    ? `${rawWsUrl}${rawWsUrl.includes('?') ? '&' : '?'}key=${encodeURIComponent(userKey)}`
-    : rawWsUrl;
+  const wsUrl = getWebSocketUrl('/api/ai/live');
   const ws = new WebSocket(wsUrl);
 
   ws.onopen = () => callbacks.onOpen?.();

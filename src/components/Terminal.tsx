@@ -86,10 +86,11 @@ export const Terminal: React.FC<TerminalProps> = ({
 
   const handleSend = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (isComposingRef.current) return;
-    if (!currentInput && !isRunning) return;
+    isComposingRef.current = false;
+    const liveValue = inputRef.current ? inputRef.current.value : currentInput;
+    if (!liveValue && !isRunning) return;
 
-    onSendStdin(currentInput);
+    onSendStdin(liveValue);
     setCurrentInput('');
   };
 
@@ -340,11 +341,15 @@ export const Terminal: React.FC<TerminalProps> = ({
             </button>
           </div>
           <textarea
+            lang="vi"
             value={stdinPreset}
             onChange={(e) => setStdinPreset(e.target.value)}
             placeholder="Ví dụ:&#10;Nguyễn Văn An&#10;25&#10;1.75"
             rows={3}
-            className="w-full bg-[#0f1018] border border-[#33344a] rounded p-2 text-xs font-mono text-[#f8fafc] focus:outline-none focus:border-amber-400 transition"
+            spellCheck={false}
+            autoCapitalize="none"
+            inputMode="text"
+            className="w-full bg-[#0f1018] border border-[#33344a] rounded p-2 text-xs font-mono text-[#f8fafc] focus:outline-none focus:border-amber-400 transition select-text"
           />
         </div>
       )}
@@ -638,14 +643,13 @@ export const Terminal: React.FC<TerminalProps> = ({
             type="text"
             value={currentInput}
             onChange={(e) => {
-              const nativeEv = e.nativeEvent as any;
-              if (nativeEv?.isComposing || nativeEv?.inputType === 'insertCompositionText') {
-                isComposingRef.current = true;
-              }
               setCurrentInput(e.target.value);
             }}
             onFocus={() => setIsInputFocused(true)}
-            onBlur={() => setIsInputFocused(false)}
+            onBlur={() => {
+              isComposingRef.current = false;
+              setIsInputFocused(false);
+            }}
             onCompositionStart={() => {
               isComposingRef.current = true;
             }}
@@ -654,8 +658,11 @@ export const Terminal: React.FC<TerminalProps> = ({
               setCurrentInput(e.currentTarget.value);
             }}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229) {
-                return;
+              if (
+                e.key === 'Enter' &&
+                (e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229)
+              ) {
+                e.preventDefault();
               }
             }}
             spellCheck={false}

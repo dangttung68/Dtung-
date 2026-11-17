@@ -14,6 +14,7 @@ import {
   ChevronUp,
   ChevronDown,
 } from 'lucide-react';
+import type { User as FirebaseUser } from 'firebase/auth';
 import { ExecutionEngine } from '../types';
 
 interface TopBarProps {
@@ -37,6 +38,9 @@ interface TopBarProps {
   onToggleEngine?: () => void;
   isTopBarCollapsed?: boolean;
   onToggleCollapseTopBar?: () => void;
+  googleUser?: FirebaseUser | null;
+  googleAccessToken?: string | null;
+  onOpenGoogleAccount?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -60,6 +64,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleEngine,
   isTopBarCollapsed,
   onToggleCollapseTopBar,
+  googleUser,
+  googleAccessToken,
+  onOpenGoogleAccount,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -239,6 +246,47 @@ export const TopBar: React.FC<TopBarProps> = ({
         >
           <Settings className="w-4 h-4 text-amber-400 group-hover:text-amber-200 group-hover:rotate-45 transition-all drop-shadow-[0_0_6px_rgba(245,158,11,0.8)]" />
         </button>
+
+        {/* 6. 👤 Tài khoản Google & Drive */}
+        {onOpenGoogleAccount && (
+          <button
+            onClick={onOpenGoogleAccount}
+            className={`h-8 min-w-[38px] px-2 flex items-center justify-center rounded-lg border-2 transition-all duration-100 active:translate-y-0.5 active:shadow-none shrink-0 cursor-pointer relative ${
+              googleUser && googleAccessToken
+                ? 'bg-[#102920] hover:bg-[#16382b] border-emerald-400/80 text-emerald-200 shadow-[0_2px_0_0_#064e3b]'
+                : googleUser
+                ? 'bg-[#2a2114] hover:bg-[#3a2d1b] border-amber-400/70 text-amber-200 shadow-[0_2px_0_0_#451a03]'
+                : 'bg-[#191d2b] hover:bg-[#23293d] border-sky-400/60 text-sky-200 shadow-[0_2px_0_0_#0c1a30]'
+            }`}
+            title={
+              googleUser
+                ? `Tài khoản Google: ${googleUser.displayName || googleUser.email || 'Đã đăng nhập'}`
+                : 'Đăng nhập tài khoản Google & Google Drive'
+            }
+          >
+            {googleUser?.photoURL ? (
+              <img
+                src={googleUser.photoURL}
+                alt={googleUser.displayName || 'Google'}
+                className="w-5 h-5 rounded-full object-cover border border-white/30"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <span className="text-xs font-black tracking-tight">
+                {googleUser ? (googleUser.displayName?.[0] || googleUser.email?.[0] || 'G').toUpperCase() : 'G'}
+              </span>
+            )}
+            <span
+              className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border border-black ${
+                googleUser && googleAccessToken
+                  ? 'bg-emerald-400'
+                  : googleUser
+                  ? 'bg-amber-400'
+                  : 'bg-sky-400'
+              }`}
+            />
+          </button>
+        )}
 
         {/* 7. ▴ Nút Thu gọn thanh công cụ (Nằm trong thanh trược) */}
         {onToggleCollapseTopBar && (

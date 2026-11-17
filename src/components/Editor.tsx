@@ -1,4 +1,4 @@
-import React, { useRef, useState, useImperativeHandle, forwardRef } from 'react';
+import React, { useRef, useState, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { SyntaxColors } from '../types';
 import { highlightPythonCode } from '../utils/highlighter';
 
@@ -56,13 +56,23 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
 
   const [cursorPos, setCursorPos] = useState<number>(0);
   const [activeLine, setActiveLine] = useState<number>(1);
-  const [isComposing, setIsComposing] = useState<boolean>(false);
   const isComposingRef = useRef<boolean>(false);
 
   // Auto-scroll tracking references according to the 3 specification rules
   const lastScrollLeftRef = useRef<number>(0);
   const isEnterKeyRef = useRef<boolean>(false);
   const prevCodeRef = useRef<string>(code);
+
+  // Synchronize external code changes (open file, AI fix, study template, clear)
+  // WITHOUT touching textarea.value while Android IME composition is active
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || isComposingRef.current) return;
+    if (textarea.value !== code) {
+      textarea.value = code;
+      prevCodeRef.current = code;
+    }
+  }, [code]);
 
   /**
    * 📐 Thuật toán tối ưu tự động cuộn thông minh theo 3 quy tắc:
@@ -72,7 +82,7 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
    */
   const applyAutoScroll = (forcedIsEnter?: boolean) => {
     const textarea = textareaRef.current;
-    if (!textarea) return;
+    if (!textarea || isComposingRef.current) return;
 
     const pos = textarea.selectionStart;
     const val = textarea.value;
@@ -92,8 +102,10 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
     prevCodeRef.current = val;
 
     if (isEnter) {
-      textarea.scrollLeft = 0;
-      if (highlightRef.current) highlightRef.current.scrollLeft = 0;
+      if (textarea.scrollLeft !== 0) textarea.scrollLeft = 0;
+      if (highlightRef.current && highlightRef.current.scrollLeft !== 0) {
+        highlightRef.current.scrollLeft = 0;
+      }
       lastScrollLeftRef.current = 0;
       return;
     }
@@ -119,20 +131,19 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
     const visibleRight = curScrollLeft + viewportWidth - paddingRight - rightMargin;
 
     // 2. Khóa cứng vị trí khi đang làm việc trong vùng nhìn (Không giật lùi):
-    // Con trỏ đang nằm trong tầm nhìn thấy rõ -> giữ nguyên 100% vị trí cuộn hiện tại, không reset về 0.
+    // Con trỏ đang nằm trong tầm nhìn thấy rõ -> giữ nguyên vị trí cuộn hiện tại mà không ghi lại scrollLeft.
     if (cursorPixelX >= visibleLeft && cursorPixelX <= visibleRight) {
-      textarea.scrollLeft = curScrollLeft;
-      if (highlightRef.current) highlightRef.current.scrollLeft = curScrollLeft;
       lastScrollLeftRef.current = curScrollLeft;
       return;
     }
 
     // 3. Tự động cuộn sang phải theo từng ký tự gõ:
-    // Khi gõ tiếp từ mép phải, màn hình tiếp tục cuộn sang phải theo từng ký tự, giữ con trỏ cách mép phải ~2.5 ký tự.
     if (cursorPixelX > visibleRight) {
-      const targetScrollLeft = Math.round(cursorPixelX - viewportWidth + paddingRight + rightMargin);
-      textarea.scrollLeft = Math.max(0, targetScrollLeft);
-      if (highlightRef.current) highlightRef.current.scrollLeft = Math.max(0, targetScrollLeft);
+      const targetScrollLeft = Math.max(0, Math.round(cursorPixelX - viewportWidth + paddingRight + rightMargin));
+      if (textarea.scrollLeft !== targetScrollLeft) textarea.scrollLeft = targetScrollLeft;
+      if (highlightRef.current && highlightRef.current.scrollLeft !== targetScrollLeft) {
+        highlightRef.current.scrollLeft = targetScrollLeft;
+      }
       lastScrollLeftRef.current = targetScrollLeft;
       return;
     }
@@ -140,8 +151,10 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
     // Nếu con trỏ nằm về bên trái của vùng nhìn thấy (ví dụ bấm mũi tên trái hoặc backspace)
     if (cursorPixelX < visibleLeft) {
       const targetScrollLeft = Math.max(0, Math.round(cursorPixelX - paddingLeft - (1.5 * charWidth)));
-      textarea.scrollLeft = targetScrollLeft;
-      if (highlightRef.current) highlightRef.current.scrollLeft = targetScrollLeft;
+      if (textarea.scrollLeft !== targetScrollLeft) textarea.scrollLeft = targetScrollLeft;
+      if (highlightRef.current && highlightRef.current.scrollLeft !== targetScrollLeft) {
+        highlightRef.current.scrollLeft = targetScrollLeft;
+      }
       lastScrollLeftRef.current = targetScrollLeft;
     }
   };
@@ -152,6 +165,7 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
       const textarea = textareaRef.current;
       if (!textarea) return;
 
+      isComposingRef.current = false;
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const val = textarea.value;
@@ -162,22 +176,27 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
       }
 
       const updated = val.substring(0, start) + text + val.substring(end);
-      onChange(updated);
+      const nextPos = start + text.length;
+      textarea.value = updated;
+      prevCodeRef.current = updated;
+      textarea.focus();
+      textarea.setSelectionRange(nextPos, nextPos);
 
-      setTimeout(() => {
-        textarea.focus();
-        const nextPos = start + text.length;
-        textarea.setSelectionRange(nextPos, nextPos);
-        setCursorPos(nextPos);
-        updateActiveLine(updated, nextPos);
-        applyAutoScroll(isEnter);
-      }, 0);
+      onChange(updated);
+      setCursorPos(nextPos);
+      updateActiveLine(updated, nextPos);
+      requestAnimationFrame(() => applyAutoScroll(isEnter));
     },
     focus: () => {
       textareaRef.current?.focus();
     },
     getValue: () => textareaRef.current?.value || '',
     setValue: (val: string) => {
+      isComposingRef.current = false;
+      if (textareaRef.current) {
+        textareaRef.current.value = val;
+        prevCodeRef.current = val;
+      }
       onChange(val);
     },
     getSelection: () => {
@@ -239,10 +258,11 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
       if (start === end) {
         // Single cursor: insert indent spaces
         const updated = val.substring(0, start) + spaces + val.substring(end);
+        const nextPos = start + indentSpaces;
+        textarea.value = updated;
+        prevCodeRef.current = updated;
+        textarea.setSelectionRange(nextPos, nextPos);
         onChange(updated);
-        setTimeout(() => {
-          textarea.setSelectionRange(start + indentSpaces, start + indentSpaces);
-        }, 0);
       } else {
         // Multi-line selection: indent each selected line
         const beforeSelection = val.substring(0, start);
@@ -254,11 +274,15 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
           // Unindent
           const unindented = lines.map(line => line.startsWith(spaces) ? line.slice(indentSpaces) : line).join('\n');
           const updated = val.substring(0, lineStart) + unindented + val.substring(end);
+          textarea.value = updated;
+          prevCodeRef.current = updated;
           onChange(updated);
         } else {
           // Indent
           const indented = lines.map(line => spaces + line).join('\n');
           const updated = val.substring(0, lineStart) + indented + val.substring(end);
+          textarea.value = updated;
+          prevCodeRef.current = updated;
           onChange(updated);
         }
       }
@@ -283,15 +307,15 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
       e.preventDefault();
       const insertText = '\n' + currentIndent;
       const updated = val.substring(0, start) + insertText + val.substring(end);
-      onChange(updated);
+      const nextPos = start + insertText.length;
 
-      setTimeout(() => {
-        const nextPos = start + insertText.length;
-        textarea.setSelectionRange(nextPos, nextPos);
-        setCursorPos(nextPos);
-        updateActiveLine(updated, nextPos);
-        applyAutoScroll(true);
-      }, 0);
+      textarea.value = updated;
+      prevCodeRef.current = updated;
+      textarea.setSelectionRange(nextPos, nextPos);
+      onChange(updated);
+      setCursorPos(nextPos);
+      updateActiveLine(updated, nextPos);
+      requestAnimationFrame(() => applyAutoScroll(true));
       return;
     }
 
@@ -304,13 +328,13 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
       if (/^\s+$/.test(lineUpToCursor) && lineUpToCursor.length >= indentSpaces && lineUpToCursor.length % indentSpaces === 0) {
         e.preventDefault();
         const updated = val.substring(0, start - indentSpaces) + val.substring(end);
+        const nextPos = start - indentSpaces;
+        textarea.value = updated;
+        prevCodeRef.current = updated;
+        textarea.setSelectionRange(nextPos, nextPos);
         onChange(updated);
-        setTimeout(() => {
-          const nextPos = start - indentSpaces;
-          textarea.setSelectionRange(nextPos, nextPos);
-          setCursorPos(nextPos);
-          updateActiveLine(updated, nextPos);
-        }, 0);
+        setCursorPos(nextPos);
+        updateActiveLine(updated, nextPos);
         return;
       }
     }
@@ -393,34 +417,38 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
           <textarea
             ref={textareaRef}
             lang="vi"
-            value={code}
+            defaultValue={code}
             onChange={(e) => {
-              const nativeEv = e.nativeEvent as any;
-              if (nativeEv?.isComposing || nativeEv?.inputType === 'insertCompositionText') {
-                isComposingRef.current = true;
-                if (!isComposing) setIsComposing(true);
+              const newVal = e.target.value;
+              onChange(newVal);
+              if (!isComposingRef.current) {
+                handleSelectOrClick();
+                requestAnimationFrame(() => applyAutoScroll());
               }
-              onChange(e.target.value);
-              handleSelectOrClick();
-              requestAnimationFrame(() => applyAutoScroll());
             }}
             onCompositionStart={() => {
               isComposingRef.current = true;
-              setIsComposing(true);
             }}
-            onCompositionUpdate={() => {
+            onCompositionUpdate={(e) => {
               isComposingRef.current = true;
-              if (!isComposing) setIsComposing(true);
+              onChange(e.currentTarget.value);
             }}
             onCompositionEnd={(e) => {
               isComposingRef.current = false;
-              setIsComposing(false);
-              onChange(e.currentTarget.value);
+              const finalVal = e.currentTarget.value;
+              prevCodeRef.current = finalVal;
+              onChange(finalVal);
               handleSelectOrClick();
               requestAnimationFrame(() => applyAutoScroll());
             }}
+            onBlur={() => {
+              isComposingRef.current = false;
+            }}
             onKeyDown={handleKeyDown}
-            onKeyUp={() => {
+            onKeyUp={(e) => {
+              if (e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229) {
+                return;
+              }
               handleSelectOrClick();
               applyAutoScroll();
             }}
@@ -428,12 +456,13 @@ export const Editor = forwardRef<EditorRef, EditorProps>(({
             onScroll={handleScroll}
             spellCheck={false}
             autoCapitalize="none"
-            autoCorrect="on"
-            autoComplete="on"
+            autoCorrect="off"
+            autoComplete="off"
             inputMode="text"
             className="absolute inset-0 w-full h-full py-3 pl-3 pr-6 m-0 border-0 outline-none resize-none whitespace-pre font-mono z-2 bg-transparent overflow-auto select-text"
             style={{
-              color: isComposing ? colors.foreground : 'transparent',
+              color: 'transparent',
+              WebkitTextFillColor: 'transparent',
               caretColor: '#38bdf8',
               lineHeight: `${lineHeightPx}px`,
               fontSize: `${fontSize}px`,

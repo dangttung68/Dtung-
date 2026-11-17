@@ -39,7 +39,7 @@ app.get('/api/health', (req, res) => {
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, x-gemini-api-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma');
   res.setHeader('Access-Control-Expose-Headers', '*');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
@@ -330,17 +330,40 @@ function isValidGeminiKeyFormat(key: string): boolean {
   return /^[A-Za-z0-9_-]{20,}$/.test(s);
 }
 
-// Initialize Gemini API
-const rawServerEnvKey = (process.env.GEMINI_API_KEY || '').replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-const serverEnvKey = isValidGeminiKeyFormat(rawServerEnvKey) ? rawServerEnvKey : '';
-const ai = new GoogleGenAI({
-  apiKey: serverEnvKey || undefined,
+// Initialize Gemini API dynamically so updated environment variables are always honored
+function getServerEnvGeminiKey(): string {
+  const raw = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').replace(
+    /[\s\u200B-\u200D\uFEFF'"]+/g,
+    ''
+  );
+  return isValidGeminiKeyFormat(raw) ? raw : '';
+}
+
+let cachedClientKey = getServerEnvGeminiKey();
+let ai = new GoogleGenAI({
+  apiKey: cachedClientKey || undefined,
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
     },
   },
 });
+
+function getActiveAiInstance(): { client: GoogleGenAI; key: string } {
+  const currentKey = getServerEnvGeminiKey();
+  if (currentKey !== cachedClientKey) {
+    cachedClientKey = currentKey;
+    ai = new GoogleGenAI({
+      apiKey: cachedClientKey || undefined,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return { client: ai, key: currentKey };
+}
 
 // Setup WebSocket servers: Python Execution and Live AI Session
 const pythonWss = new WebSocketServer({ noServer: true });
@@ -694,24 +717,13 @@ pythonWss.on('connection', (ws: WebSocket) => {
 });
 
 // Live API WebSocket connection for real-time bidirectional audio & text (gemini-3.8-live)
-liveAiWss.on('connection', async (ws: WebSocket, req: any) => {
-  let customKey = '';
-  try {
-    const url = new URL(req?.url || '', 'http://localhost');
-    customKey = (url.searchParams.get('key') || (req?.headers?.['x-gemini-api-key'] as string) || '').trim();
-  } catch (_) {}
-
-  const cleanCustomKey = isValidGeminiKeyFormat(customKey) ? customKey : '';
-  const effectiveKey = cleanCustomKey || serverEnvKey;
-  if (!effectiveKey) {
-    ws.send(JSON.stringify({ error: 'Máy chủ chưa được cấu hình GEMINI_API_KEY hợp lệ. Vui lòng kiểm tra cấu hình hoặc nhập khóa API trong Cài đặt.' }));
+liveAiWss.on('connection', async (ws: WebSocket) => {
+  const { client: liveAi, key: activeLiveKey } = getActiveAiInstance();
+  if (!activeLiveKey) {
+    ws.send(JSON.stringify({ error: 'Máy chủ chưa được cấu hình GEMINI_API_KEY hợp lệ trong AI Studio Secrets hoặc Render Environment.' }));
     ws.close();
     return;
   }
-
-  const liveAi = cleanCustomKey
-    ? new GoogleGenAI({ apiKey: cleanCustomKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } })
-    : ai;
 
   let session: any = null;
   let isClosed = false;
@@ -1089,7 +1101,7 @@ app.get('/api/system/status', (req, res) => {
     uptime: Math.round(process.uptime()),
     timestamp: Date.now(),
     features: {
-      geminiAi: Boolean(serverEnvKey),
+      geminiAi: Boolean(getServerEnvGeminiKey()),
       cpythonNative: true,
       websocketStreaming: true,
       apkApiGateway: true,
@@ -1797,17 +1809,14 @@ function withTimeout<T>(promise: Promise<T>, ms = 35000, timeoutMessage = 'Gemin
   });
 }
 
-// Multi-model fallback chain using modern recommended Gemini models
+// Multi-model fallback chain using active Gemini models from gemini-api skill
 const CANDIDATE_MODELS = [
   'gemini-4-hydrogen',
-  'gemini-3.8-flash',
   'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
-  'gemini-4-argon',
 ];
 
 function supportsThinkingConfig(modelName: string): boolean {
-  return modelName.includes('gemini-4') || modelName.includes('3.8');
+  return modelName.includes('gemini-4');
 }
 
 function isAuthOrPermissionError(err: any): boolean {
@@ -1839,14 +1848,14 @@ function extractFriendlyGeminiError(err: any): { friendly: string; raw: string; 
         const isInvalidKey = details.some((d: any) => d.reason === 'API_KEY_INVALID') || msg.includes('API key not valid');
         if (isInvalidKey) {
           return {
-            friendly: 'Khóa API không hợp lệ. Vui lòng kiểm tra lại chuỗi khóa đã sao chép từ Google AI Studio.',
+            friendly: 'Máy chủ Gemini AI chưa có GEMINI_API_KEY hợp lệ từ bảng Settings > Secrets của dự án Google AI Studio.',
             raw,
             code: 400,
           };
         }
         if (msg.includes('Quota exceeded') || msg.includes('RESOURCE_EXHAUSTED') || code === 429) {
           return {
-            friendly: 'Khóa API đã hết hạn mức sử dụng (Quota Exceeded). Vui lòng đợi vài phút hoặc dùng khóa thuộc Project khác.',
+            friendly: 'Dịch vụ Gemini API đang vượt hạn mức sử dụng tạm thời (Quota Exceeded). Vui lòng thử lại sau ít phút.',
             raw,
             code: 429,
           };
@@ -1868,21 +1877,21 @@ function extractFriendlyGeminiError(err: any): { friendly: string; raw: string; 
   const lower = raw.toLowerCase();
   if (lower.includes('api_key_invalid') || lower.includes('api key not valid') || lower.includes('unauthenticated')) {
     return {
-      friendly: 'Khóa API không hợp lệ. Hãy sao chép lại toàn bộ chuỗi khóa từ Google AI Studio (aistudio.google.com/app/apikey).',
+      friendly: 'Máy chủ Gemini AI chưa có GEMINI_API_KEY hợp lệ từ bảng Settings > Secrets của dự án Google AI Studio.',
       raw,
       code: 401,
     };
   }
   if (lower.includes('quota') || lower.includes('resource_exhausted') || lower.includes('rate limit') || lower.includes('429')) {
     return {
-      friendly: 'Khóa API đã hết hạn mức sử dụng miễn phí (Quota Limit). Vui lòng thử lại sau ít phút hoặc đổi sang Project khác.',
+      friendly: 'Dịch vụ Gemini API đang vượt hạn mức sử dụng miễn phí (Quota Limit). Vui lòng thử lại sau ít phút.',
       raw,
       code: 429,
     };
   }
   if (lower.includes('permission_denied') || lower.includes('403')) {
     return {
-      friendly: 'Khóa API bị từ chối quyền truy cập (Permission Denied). Đảm bảo dịch vụ Generative Language API đã được bật.',
+      friendly: 'Dịch vụ Gemini API bị từ chối quyền truy cập (Permission Denied). Hãy kiểm tra GEMINI_API_KEY và Generative Language API trong dự án.',
       raw,
       code: 403,
     };
@@ -1909,42 +1918,16 @@ function extractFriendlyGeminiError(err: any): { friendly: string; raw: string; 
   };
 }
 
-function getAiClient(req?: express.Request): {
+function getAiClient(_req?: express.Request): {
   aiClient: GoogleGenAI;
   hasKey: boolean;
   isCustom: boolean;
   hasServerKey: boolean;
 } {
-  let customKey = (
-    (req?.headers?.['x-gemini-api-key'] as string) ||
-    req?.body?.geminiApiKey ||
-    (req?.query?.key as string) ||
-    ''
-  ).replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-
-  const hasServerKey = isValidGeminiKeyFormat(serverEnvKey);
-
-  if (customKey) {
-    if (customKey.includes('...') || customKey.startsWith('.')) {
-      console.log(`\x1b[33m[AI Key Notice] Khóa API tùy chỉnh chứa dấu ba chấm (...) nên hệ thống ưu tiên dùng khóa máy chủ.\x1b[0m`);
-    } else if (isValidGeminiKeyFormat(customKey) && customKey !== serverEnvKey) {
-      try {
-        const customAi = new GoogleGenAI({
-          apiKey: customKey,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        });
-        return {
-          aiClient: customAi,
-          hasKey: true,
-          isCustom: true,
-          hasServerKey,
-        };
-      } catch (_) {}
-    }
-  }
-
+  const { client, key } = getActiveAiInstance();
+  const hasServerKey = isValidGeminiKeyFormat(key);
   return {
-    aiClient: ai,
+    aiClient: client,
     hasKey: hasServerKey,
     isCustom: false,
     hasServerKey,
@@ -1980,8 +1963,8 @@ function classifyServerAiError(err: any): {
   ) {
     return {
       failureType: 'INVALID_KEY',
-      reason: 'Khóa API không hợp lệ, bị thu hồi hoặc chứa ký tự không đúng.',
-      remediation: 'Kiểm tra biến môi trường GEMINI_API_KEY hoặc khóa cá nhân trong Cài đặt. Sao chép lại toàn bộ chuỗi từ Google AI Studio.',
+      reason: 'GEMINI_API_KEY của máy chủ chưa được thiết lập đúng hoặc đã bị thu hồi.',
+      remediation: 'Mở bảng Settings > Secrets của dự án Google AI Studio để chọn hoặc cập nhật GEMINI_API_KEY hợp lệ.',
     };
   }
 
@@ -3126,7 +3109,7 @@ app.post('/api/ai/chat/stream', async (req, res) => {
 
   if (!hasKey) {
     const notice =
-      '⚠️ **Chưa kết nối được Google Gemini AI:** Máy chủ chưa có `GEMINI_API_KEY` hợp lệ (hãy kiểm tra **Settings > Secrets** trên AI Studio hoặc bấm **🔑 Nhập khóa AI** để dùng khóa cá nhân).\n\n---\n\n';
+      '⚠️ **Chưa kết nối được Google Gemini AI:** Máy chủ chưa có `GEMINI_API_KEY` hợp lệ trong AI Studio **Settings > Secrets**.\n\n---\n\n';
     const fallbackText = generateLocalChatFallback(code, messages, instruction, errorText);
     res.write(`data: ${JSON.stringify({ text: `${notice}${fallbackText}` })}\n\n`);
     res.write('data: [DONE]\n\n');
@@ -3236,9 +3219,7 @@ app.post('/api/ai/chat/stream', async (req, res) => {
       const friendlyReason = effectiveError
         ? extractFriendlyGeminiError(effectiveError).friendly
         : 'Không nhận được phản hồi từ Google Gemini.';
-      const notice = isCustom
-        ? `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n\n---\n\n`
-        : `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n👉 *Trên AI Studio: hãy kiểm tra lại \`GEMINI_API_KEY\` trong **Settings > Secrets**, hoặc bấm **🔑 Nhập khóa AI** để dùng khóa Google AI Studio cá nhân.*\n\n---\n\n`;
+      const notice = `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n💡 *Ứng dụng không dùng cổng nhập khóa API thủ công; kết nối AI trực tuyến lấy khóa từ **Settings > Secrets** của dự án Google AI Studio. Bên dưới là kết quả phân tích PEP 8 nội bộ:*\n\n---\n\n`;
       const fallbackText = generateLocalChatFallback(code, messages, instruction, errorText);
       res.write(`data: ${JSON.stringify({ text: `${notice}${fallbackText}` })}\n\n`);
     }
@@ -3270,7 +3251,7 @@ app.post('/api/ai/chat', async (req, res) => {
 
   if (!hasKey) {
     const notice =
-      '⚠️ **Chưa kết nối được Google Gemini AI:** Máy chủ chưa có `GEMINI_API_KEY` hợp lệ (hãy kiểm tra **Settings > Secrets** trên AI Studio hoặc bấm **🔑 Nhập khóa AI** để dùng khóa cá nhân).\n\n---\n\n';
+      '⚠️ **Chưa kết nối được Google Gemini AI:** Máy chủ chưa có `GEMINI_API_KEY` hợp lệ trong AI Studio **Settings > Secrets**.\n\n---\n\n';
     const fallback = generateLocalChatFallback(code, messages, instruction, errorText);
     return res.json({ reply: `${notice}${fallback}` });
   }
@@ -3335,9 +3316,7 @@ app.post('/api/ai/chat', async (req, res) => {
       remediation: diag.remediation,
     });
     console.log('[AI Chat] Kích hoạt phân tích thông minh dự phòng.');
-    const notice = isCustom
-      ? `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n\n---\n\n`
-      : `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n👉 *Trên AI Studio: kiểm tra lại \`GEMINI_API_KEY\` trong **Settings > Secrets**, hoặc bấm **🔑 Nhập khóa AI** để dùng khóa cá nhân.*\n\n---\n\n`;
+    const notice = `⚠️ **Chưa kết nối được Google Gemini AI:** ${friendlyReason}\n💡 *Ứng dụng không dùng cổng nhập khóa API thủ công; kết nối AI trực tuyến lấy khóa từ **Settings > Secrets** của dự án Google AI Studio. Bên dưới là kết quả phân tích PEP 8 nội bộ:*\n\n---\n\n`;
     const fallbackReply = generateLocalChatFallback(code, messages, instruction, errorText);
     return res.json({ reply: `${notice}${fallbackReply}` });
   }
@@ -3346,172 +3325,85 @@ app.post('/api/ai/chat', async (req, res) => {
 // REST endpoint: Verify Server Gemini AI Status (supports GET & POST with no-store caching)
 app.all('/api/ai/status', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  const { aiClient, hasKey, isCustom, hasServerKey } = getAiClient(req);
+  const { aiClient, hasKey } = getAiClient(req);
   if (!hasKey) {
     return res.json({
       ok: false,
       model: 'local-pep8-engine',
-      message: 'Máy chủ chưa có GEMINI_API_KEY hợp lệ (Settings > Secrets). Hãy nhập khóa Gemini API cá nhân trong Cài đặt!',
+      message: 'Máy chủ AI Studio chưa có GEMINI_API_KEY hợp lệ trong Settings > Secrets.',
     });
   }
 
-  const clientsToTry = isCustom && hasServerKey ? [aiClient, ai] : [aiClient];
-  let customError: any = null;
   let lastError: any = null;
 
-  for (const activeClient of clientsToTry) {
-    for (const model of CANDIDATE_MODELS) {
-      const tryPing = async (useThinking: boolean) => {
-        const modelConfig: any = useThinking && supportsThinkingConfig(model)
-          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-          : undefined;
-        return await withTimeout(
-          activeClient.models.generateContent({
-            model,
-            contents: 'Ping',
-            config: modelConfig,
-          }),
-          12000
-        );
-      };
+  for (const model of CANDIDATE_MODELS) {
+    const tryPing = async (useThinking: boolean) => {
+      const modelConfig: any = useThinking && supportsThinkingConfig(model)
+        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+        : undefined;
+      return await withTimeout(
+        aiClient.models.generateContent({
+          model,
+          contents: 'Ping',
+          config: modelConfig,
+        }),
+        12000
+      );
+    };
 
-      try {
-        let response = await tryPing(true);
-        if (response && response.text) {
-          return res.json({
-            ok: true,
-            model,
-            message: isCustom && activeClient === aiClient
-              ? `Khóa Google Gemini API cá nhân đang hoạt động chính xác (${model})!`
-              : `Trợ lý Google Gemini sẵn sàng trên máy chủ (${model})!`,
-          });
-        }
-      } catch (e: any) {
-        const status = (e?.status as number) || (e?.statusCode as number);
-        if (status === 400 && supportsThinkingConfig(model) && !isAuthOrPermissionError(e)) {
-          try {
-            const retryResp = await tryPing(false);
-            if (retryResp && retryResp.text) {
-              return res.json({
-                ok: true,
-                model,
-                message: isCustom && activeClient === aiClient
-                  ? `Khóa Google Gemini API cá nhân đang hoạt động chính xác (${model})!`
-                  : `Trợ lý Google Gemini sẵn sàng trên máy chủ (${model})!`,
-              });
-            }
-          } catch (retryErr: any) {
-            e = retryErr;
+    try {
+      const response = await tryPing(true);
+      if (response && response.text) {
+        return res.json({
+          ok: true,
+          model,
+          message: `Trợ lý Google Gemini sẵn sàng trên máy chủ (${model})!`,
+        });
+      }
+    } catch (e: any) {
+      const status = (e?.status as number) || (e?.statusCode as number);
+      if (status === 400 && supportsThinkingConfig(model) && !isAuthOrPermissionError(e)) {
+        try {
+          const retryResp = await tryPing(false);
+          if (retryResp && retryResp.text) {
+            return res.json({
+              ok: true,
+              model,
+              message: `Trợ lý Google Gemini sẵn sàng trên máy chủ (${model})!`,
+            });
           }
+        } catch (retryErr: any) {
+          e = retryErr;
         }
-        if (isCustom && activeClient === aiClient) {
-          customError = e;
-        }
-        lastError = e;
-        if (isAuthOrPermissionError(e)) {
-          break;
-        }
+      }
+      lastError = e;
+      if (isAuthOrPermissionError(e)) {
+        break;
       }
     }
   }
 
-  const errorInfo = extractFriendlyGeminiError(customError || lastError);
+  const errorInfo = extractFriendlyGeminiError(lastError);
+  const redactedRaw = (errorInfo.raw || '').replace(/AIza[A-Za-z0-9_-]{10,}/g, '[REDACTED_KEY]');
+  const rawEnvGemini = (process.env.GEMINI_API_KEY || '').trim();
+  const rawEnvGoogle = (process.env.GOOGLE_API_KEY || '').trim();
+  const rawEnvApiKey = (process.env.API_KEY || '').trim();
   return res.json({
     ok: false,
     model: CANDIDATE_MODELS[0],
-    message: isCustom
-      ? `${errorInfo.friendly}`
-      : `${errorInfo.friendly} (Kiểm tra GEMINI_API_KEY trong Settings > Secrets hoặc nhập khóa cá nhân)`,
+    message: `${errorInfo.friendly} Ứng dụng không có ô nhập khóa thủ công; bộ phân tích PEP 8 nội bộ vẫn sẵn sàng ngoại tuyến.`,
+    diagnostic: {
+      httpStatus: errorInfo.code ?? null,
+      keyPresent: hasKey,
+      keySource: rawEnvGemini ? 'GEMINI_API_KEY' : (rawEnvGoogle ? 'GOOGLE_API_KEY' : 'NONE'),
+      geminiKeyLen: rawEnvGemini.length,
+      geminiKeyStartsAIza: rawEnvGemini.startsWith('AIza'),
+      googleKeyLen: rawEnvGoogle.length,
+      apiKeyLen: rawEnvApiKey.length,
+      apiKeyStartsAIza: rawEnvApiKey.startsWith('AIza'),
+      rawError: redactedRaw.slice(0, 350),
+    },
   });
-});
-
-// REST endpoint: Verify Gemini readiness & custom key testing
-app.post('/api/ai/verify-key', async (req, res) => {
-  const customKey = (
-    (req.body?.apiKey as string) ||
-    (req.headers['x-gemini-api-key'] as string) ||
-    ''
-  ).replace(/[\s\u200B-\u200D\uFEFF'"]+/g, '');
-
-  if (customKey && customKey.length < 8) {
-    return res.status(400).json({
-      ok: false,
-      model: CANDIDATE_MODELS[0],
-      message: 'Khóa API quá ngắn. Vui lòng kiểm tra lại khóa đã sao chép từ Google AI Studio.',
-    });
-  }
-
-  const { aiClient, hasKey } = getAiClient(req);
-  if (!customKey && !hasKey) {
-    return res.status(400).json({
-      ok: false,
-      model: 'local-pep8-engine',
-      message: 'Chưa có khóa Gemini API. Vui lòng dán khóa Google Gemini API của bạn vào ô trên hoặc cấu hình GEMINI_API_KEY trong Settings > Secrets.',
-    });
-  }
-
-  try {
-    const testClient = customKey
-      ? new GoogleGenAI({ apiKey: customKey, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } })
-      : aiClient;
-
-    let resp: any = null;
-    let successModel = CANDIDATE_MODELS[0];
-    let lastError: any = null;
-
-    for (const model of CANDIDATE_MODELS) {
-      try {
-        const modelConfig: any = {};
-        if (supportsThinkingConfig(model)) {
-          modelConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-        }
-        resp = await withTimeout(
-          testClient.models.generateContent({
-            model,
-            contents: 'Xin chào',
-            config: Object.keys(modelConfig).length > 0 ? modelConfig : undefined,
-          }),
-          20000
-        );
-        if (resp && resp.text) {
-          successModel = model;
-          break;
-        }
-      } catch (modelErr: any) {
-        lastError = modelErr;
-        if (isAuthOrPermissionError(modelErr)) {
-          break;
-        }
-        continue;
-      }
-    }
-
-    if (resp && resp.text) {
-      return res.json({
-        ok: true,
-        model: successModel,
-        message: `Khóa Google Gemini API hợp lệ và kết nối thành công (${successModel})!`,
-      });
-    }
-
-    throw (lastError || new Error('Không nhận được phản hồi từ mô hình'));
-  } catch (err: any) {
-    const errorInfo = extractFriendlyGeminiError(err);
-    const diag = classifyServerAiError(err);
-    printTerminalAiDiagnostic({
-      endpoint: '/api/ai/verify-key',
-      operation: 'Key Verification',
-      failureType: diag.failureType,
-      httpStatus: errorInfo.code,
-      errorMessage: errorInfo.raw,
-      remediation: diag.remediation,
-    });
-    return res.status(400).json({
-      ok: false,
-      model: CANDIDATE_MODELS[0],
-      message: errorInfo.friendly,
-    });
-  }
 });
 
 // REST endpoint: Terminal Diagnostic Logger for client/standalone AI errors

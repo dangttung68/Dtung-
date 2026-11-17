@@ -15,7 +15,7 @@ import {
   CheckCircle,
   Bug,
   Save,
-  Key,
+  Settings,
 } from 'lucide-react';
 import { ChatMessage } from '../types';
 import { sendAiChatRequest, streamAiChatRequest } from '../utils/geminiClient';
@@ -546,7 +546,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                   Gemini 3.8
                 </span>
               </div>
-              <p className="text-[10px] sm:text-[11px] text-gray-400 flex items-center space-x-1 truncate">
+              <p className="text-[10px] sm:text-[11px] text-gray-400 flex items-center space-x-1.5 truncate">
                 <FileCode className="w-3 h-3 text-sky-400 shrink-0" />
                 <span className="truncate">Đang đọc: <strong className="text-gray-200">{currentFileName}</strong></span>
               </p>
@@ -656,7 +656,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         {!aiConnStatus.checking && aiConnStatus.ok === false && (
           <div className="bg-amber-950/55 border-b border-amber-500/45 px-3 py-1.5 flex items-center justify-between gap-2 text-[11px] shrink-0">
             <span className="text-amber-200 truncate" title={aiConnStatus.message}>
-              ⚠️ {aiConnStatus.message || 'Chưa kết nối Gemini AI. Hãy nhập khóa API để kích hoạt.'}
+              ⚠️ {aiConnStatus.message || 'Chưa kết nối Gemini AI máy chủ. Đang dùng bộ phân tích PEP 8 dự phòng.'}
             </span>
             <div className="flex items-center space-x-1 shrink-0">
               <button
@@ -681,8 +681,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                   }}
                   className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-black font-extrabold rounded-lg text-[10px] flex items-center space-x-1 shrink-0 cursor-pointer transition active:scale-95"
                 >
-                  <Key className="w-3 h-3" />
-                  <span>Nhập khóa AI</span>
+                  <Settings className="w-3 h-3" />
+                  <span>Cài đặt AI & Máy chủ</span>
                 </button>
               )}
             </div>
